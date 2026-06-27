@@ -23,6 +23,8 @@ import Set
 import Spreadsheet.Ast exposing (Expr)
 import Spreadsheet.Csv as Csv
 import Spreadsheet.Deps as Deps
+import Spreadsheet.Export as Export
+import Spreadsheet.Find as Find
 import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format
 import Spreadsheet.Parser as Parser
@@ -32,6 +34,7 @@ import Spreadsheet.Refactor as Refactor
 import Spreadsheet.Render as Render
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 import Spreadsheet.Style as Style
+import Spreadsheet.Validation as Validation
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
 import Test exposing (Test, describe, fuzz, fuzz2, test)
 
@@ -66,6 +69,13 @@ suite =
         , sortFilterTests
         , nameTests
         , csvTests
+        , financeTests
+        , analysisFnTests
+        , exportTests
+        , notesTests
+        , mergeTests
+        , validationTests
+        , findTests
         ]
 
 
@@ -877,6 +887,26 @@ rng a =
     Maybe.withDefault { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } } (Ref.rangeFromA1 a)
 
 
+round2 : Value -> Value
+round2 v =
+    case v of
+        VNumber n ->
+            VNumber (toFloat (round (n * 100)) / 100)
+
+        _ ->
+            v
+
+
+round4 : Value -> Value
+round4 v =
+    case v of
+        VNumber n ->
+            VNumber (toFloat (round (n * 10000)) / 10000)
+
+        _ ->
+            v
+
+
 rawOf : String -> Sheet -> String
 rawOf a1 s =
     Sheet.rawAt (at a1) s
@@ -1234,3 +1264,250 @@ csvTests =
                 in
                 Expect.equal True (sameValues original restored [ "A1", "B1", "A2", "B2" ])
         ]
+
+
+
+-- FINANCE --------------------------------------------------------------------
+
+
+financeTests : Test
+financeTests =
+    describe "finance functions"
+        [ test "PMT amortises a loan" <|
+            \_ -> Expect.equal (round2 (VNumber -402.11)) (round2 (ev0 "=PMT(0.1,3,1000)"))
+        , test "PMT with zero rate is straight division" <|
+            \_ -> expectVal (VNumber -100) (ev0 "=PMT(0,10,1000)")
+        , test "FV of a payment stream" <|
+            \_ -> Expect.equal (round2 (VNumber 1593.74)) (round2 (ev0 "=FV(0.1,10,-100)"))
+        , test "PV of a payment stream" <|
+            \_ -> Expect.equal (round2 (VNumber 614.46)) (round2 (ev0 "=PV(0.1,10,-100)"))
+        , test "NPV discounts future cash flows" <|
+            \_ -> Expect.equal (round2 (VNumber 248.69)) (round2 (ev0 "=NPV(0.1,100,100,100)"))
+        , test "IRR solves for the zero-NPV rate" <|
+            \_ -> Expect.equal (round4 (VNumber 0.1307)) (round4 (irrOf [ -100, 60, 60 ]))
+        ]
+
+
+{-| IRR over an explicit cash-flow column. -}
+irrOf : List Float -> Value
+irrOf flows =
+    let
+        cells =
+            List.indexedMap (\i v -> ( "A" ++ String.fromInt (i + 1), VNumber v )) flows
+    in
+    ev cells "=IRR(A1:A3)"
+
+
+
+-- ANALYSIS FUNCTIONS ---------------------------------------------------------
+
+
+analysisFnTests : Test
+analysisFnTests =
+    describe "analysis functions"
+        [ test "SUMPRODUCT multiplies element-wise then sums" <|
+            \_ -> expectVal (VNumber 32) (ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ), ( "B1", VNumber 4 ), ( "B2", VNumber 5 ), ( "B3", VNumber 6 ) ] "=SUMPRODUCT(A1:A3,B1:B3)")
+        , test "SUMIFS sums where the criterion matches" <|
+            \_ -> expectVal (VNumber 40) (ev regionData "=SUMIFS(A1:A3,B1:B3,\"x\")")
+        , test "COUNTIFS counts matches" <|
+            \_ -> expectVal (VNumber 2) (ev regionData "=COUNTIFS(B1:B3,\"x\")")
+        , test "AVERAGEIFS averages matches" <|
+            \_ -> expectVal (VNumber 20) (ev regionData "=AVERAGEIFS(A1:A3,B1:B3,\"x\")")
+        , test "MAXIFS / MINIFS over matches" <|
+            \_ -> expectVal2 ( VNumber 30, VNumber 10 ) ( ev regionData "=MAXIFS(A1:A3,B1:B3,\"x\")", ev regionData "=MINIFS(A1:A3,B1:B3,\"x\")" )
+        , test "SUBTOTAL dispatches by function number" <|
+            \_ -> expectVal2 ( VNumber 15, VNumber 3 ) ( ev nums15 "=SUBTOTAL(9,A1:A5)", ev nums15 "=SUBTOTAL(1,A1:A5)" )
+        , test "PERCENTILE interpolates" <|
+            \_ -> expectVal (VNumber 3) (ev nums15 "=PERCENTILE(A1:A5,0.5)")
+        , test "QUARTILE Q1 and Q2" <|
+            \_ -> expectVal2 ( VNumber 2, VNumber 3 ) ( ev nums15 "=QUARTILE(A1:A5,1)", ev nums15 "=QUARTILE(A1:A5,2)" )
+        , test "RANK descending and ascending" <|
+            \_ -> expectVal2 ( VNumber 2, VNumber 4 ) ( ev nums15 "=RANK(4,A1:A5)", ev nums15 "=RANK(4,A1:A5,1)" )
+        , test "XLOOKUP returns the aligned value" <|
+            \_ -> expectVal (VNumber 20) (ev regionData "=XLOOKUP(\"y\",B1:B3,A1:A3)")
+        , test "XLOOKUP not-found fallback" <|
+            \_ -> expectVal (VText "none") (ev regionData "=XLOOKUP(\"z\",B1:B3,A1:A3,\"none\")")
+        ]
+
+
+regionData : List ( String, Value )
+regionData =
+    [ ( "A1", VNumber 10 ), ( "A2", VNumber 20 ), ( "A3", VNumber 30 ), ( "B1", VText "x" ), ( "B2", VText "y" ), ( "B3", VText "x" ) ]
+
+
+nums15 : List ( String, Value )
+nums15 =
+    [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ), ( "A4", VNumber 4 ), ( "A5", VNumber 5 ) ]
+
+
+
+-- EXPORT ---------------------------------------------------------------------
+
+
+exportTests : Test
+exportTests =
+    describe "export"
+        [ test "tsv joins with tabs and newlines" <|
+            \_ -> Expect.equal "Name\tQty\nPen\t3" (Export.tsv (rng "A1:B2") exportSheet)
+        , test "markdown table with header separator" <|
+            \_ -> Expect.equal "| Name | Qty |\n| --- | --- |\n| Pen | 3 |" (Export.markdown (rng "A1:B2") exportSheet)
+        , test "json keeps numbers numeric and text quoted" <|
+            \_ -> Expect.equal "[[\"Name\",\"Qty\"],[\"Pen\",3]]" (Export.json (rng "A1:B2") exportSheet)
+        , test "html emits a table with header cells" <|
+            \_ -> Expect.equal True (String.contains "<th>Name</th>" (Export.html (rng "A1:B2") exportSheet))
+        ]
+
+
+exportSheet : Sheet
+exportSheet =
+    sheetWith [ ( "A1", "Name" ), ( "B1", "Qty" ), ( "A2", "Pen" ), ( "B2", "3" ) ]
+
+
+
+-- NOTES ----------------------------------------------------------------------
+
+
+notesTests : Test
+notesTests =
+    describe "cell notes"
+        [ test "set and read a note" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.setNote (at "B2") "check this" (Sheet.empty 10 10)
+                in
+                Expect.equal (Just "check this") (Sheet.noteAt (at "B2") s)
+        , test "an empty note clears it" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10 |> Sheet.setNote (at "B2") "x" |> Sheet.setNote (at "B2") ""
+                in
+                Expect.equal Nothing (Sheet.noteAt (at "B2") s)
+        , test "a note follows its cell through an inserted row" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10 |> Sheet.setNote (at "B2") "n" |> Sheet.insertRows 0 1
+                in
+                Expect.equal ( Nothing, Just "n" ) ( Sheet.noteAt (at "B2") s, Sheet.noteAt (at "B3") s )
+        ]
+
+
+
+-- MERGED CELLS ---------------------------------------------------------------
+
+
+mergeTests : Test
+mergeTests =
+    describe "merged cells"
+        [ test "the anchor keeps its value, covered cells are cleared" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "Title" ), ( "B1", "x" ), ( "A2", "y" ), ( "B2", "z" ) ]
+                            |> Sheet.mergeCells (rng "A1:B2")
+                in
+                expectVal2 ( VText "Title", VEmpty ) ( valOf "A1" s, valOf "B1" s )
+        , test "covered cells report as covered, the anchor does not" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "Title" ) ] |> Sheet.mergeCells (rng "A1:B2")
+                in
+                Expect.equal ( False, True, True ) ( Sheet.isCovered (at "A1") s, Sheet.isCovered (at "B1") s, Sheet.isCovered (at "B2") s )
+        , test "mergeAnchorAt returns the span at the anchor only" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "Title" ) ] |> Sheet.mergeCells (rng "A1:B2")
+                in
+                Expect.equal ( Just (rng "A1:B2"), Nothing ) ( Sheet.mergeAnchorAt (at "A1") s, Sheet.mergeAnchorAt (at "B1") s )
+        , test "unmerge releases the block" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "Title" ) ] |> Sheet.mergeCells (rng "A1:B2") |> Sheet.unmerge (at "B1")
+                in
+                Expect.equal False (Sheet.isCovered (at "B1") s)
+        ]
+
+
+
+-- DATA VALIDATION ------------------------------------------------------------
+
+
+validationTests : Test
+validationTests =
+    describe "data validation"
+        [ test "number-between accepts in range, rejects out" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10 |> Sheet.addValidation (rng "A1:A5") (Validation.NumberBetween 1 10)
+                in
+                Expect.equal ( True, False ) ( Sheet.validate (at "A2") "5" s, Sheet.validate (at "A2") "20" s )
+        , test "cells outside the rule range accept anything" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10 |> Sheet.addValidation (rng "A1:A5") (Validation.NumberBetween 1 10)
+                in
+                Expect.equal True (Sheet.validate (at "C1") "999" s)
+        , test "list rule exposes a dropdown and validates case-insensitively" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10 |> Sheet.addValidation (rng "A1:A5") (Validation.OneOf [ "Yes", "No" ])
+                in
+                Expect.equal ( Just [ "Yes", "No" ], True, False ) ( Sheet.dropdownAt (at "A1") s, Sheet.validate (at "A1") "yes" s, Sheet.validate (at "A1") "maybe" s )
+        , test "isInvalid flags a current out-of-range value" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "50" ) ] |> Sheet.addValidation (rng "A1:A5") (Validation.NumberBetween 1 10)
+                in
+                Expect.equal True (Sheet.isInvalid (at "A1") s)
+        , test "a blank cell passes everything but NotBlank" <|
+            \_ -> Expect.equal ( True, False ) ( Validation.check (Validation.NumberBetween 1 10) VEmpty, Validation.check Validation.NotBlank VEmpty )
+        ]
+
+
+
+-- FIND & REPLACE -------------------------------------------------------------
+
+
+findTests : Test
+findTests =
+    describe "find & replace"
+        [ test "substring find is case-insensitive, row-major" <|
+            \_ -> Expect.equal [ at "A1", at "B1" ] (Find.findAll { defs | text = "apple" } findSheet)
+        , test "whole-cell find" <|
+            \_ -> Expect.equal [ at "A1" ] (Find.findAll { defs | text = "apple", wholeCell = True } findSheet)
+        , test "match-case excludes differing case" <|
+            \_ -> Expect.equal [] (Find.findAll { defs | text = "APPLE", matchCase = True } findSheet)
+        , test "replaceAll rewrites raw input and recalculates" <|
+            \_ ->
+                let
+                    s =
+                        Find.replaceAll { defs | text = "apple" } "orange" findSheet
+                in
+                Expect.equal ( VText "orange", "orange pie" ) ( valOf "A1" s, rawOf "B1" s )
+        , test "case-insensitive replace covers all occurrences" <|
+            \_ ->
+                let
+                    s =
+                        Find.replaceAll { defs | text = "a" } "b" (sheetWith [ ( "A1", "aAa" ) ])
+                in
+                Expect.equal "bbb" (rawOf "A1" s)
+        ]
+
+
+defs : Find.Query
+defs =
+    Find.defaults
+
+
+findSheet : Sheet
+findSheet =
+    sheetWith [ ( "A1", "apple" ), ( "B1", "apple pie" ), ( "C1", "grape" ), ( "A2", "Banana" ) ]

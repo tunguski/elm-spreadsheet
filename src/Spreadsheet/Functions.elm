@@ -121,6 +121,11 @@ knownNames =
 
     -- date
     , "DATE", "YEAR", "MONTH", "DAY", "WEEKDAY", "DAYS", "DATEVALUE"
+
+    -- finance & analysis
+    , "SUMPRODUCT", "SUMIFS", "COUNTIFS", "AVERAGEIFS", "MINIFS", "MAXIFS"
+    , "SUBTOTAL", "PERCENTILE", "QUARTILE", "RANK", "XLOOKUP"
+    , "PMT", "FV", "PV", "NPV", "IRR", "NPER"
     ]
 
 
@@ -527,6 +532,58 @@ call name args =
 
                 _ ->
                     VError ValueErr
+
+        -- Finance & analysis --------------------------------------------------
+        "SUMPRODUCT" ->
+            sumProduct args
+
+        "SUMIFS" ->
+            sumIfs args
+
+        "COUNTIFS" ->
+            countIfs args
+
+        "AVERAGEIFS" ->
+            averageIfs args
+
+        "MINIFS" ->
+            minMaxIfs True args
+
+        "MAXIFS" ->
+            minMaxIfs False args
+
+        "SUBTOTAL" ->
+            subtotal args
+
+        "PERCENTILE" ->
+            percentileFn args
+
+        "QUARTILE" ->
+            quartileFn args
+
+        "RANK" ->
+            rankFn args
+
+        "XLOOKUP" ->
+            xlookup args
+
+        "PMT" ->
+            financeFn pmt args
+
+        "FV" ->
+            financeFn fv args
+
+        "PV" ->
+            financeFn pv args
+
+        "NPER" ->
+            financeFn nper args
+
+        "NPV" ->
+            npvFn args
+
+        "IRR" ->
+            irrFn args
 
         -- Date ----------------------------------------------------------------
         "DATE" ->
@@ -2273,3 +2330,603 @@ indexOfFrom needle hay startAt =
 
         [] ->
             Nothing
+
+
+
+-- FINANCE & ANALYSIS ---------------------------------------------------------
+-- A pack of financial (PMT/FV/PV/NPER/NPV/IRR), multi-criteria (SUMIFS/COUNTIFS/...),
+-- statistical (PERCENTILE/QUARTILE/RANK), SUMPRODUCT, SUBTOTAL and XLOOKUP functions.
+
+
+resToMaybe : Result e a -> Maybe a
+resToMaybe r =
+    case r of
+        Ok x ->
+            Just x
+
+        Err _ ->
+            Nothing
+
+
+{-| The numeric value of the scalar argument at position `i`. -}
+sc : Int -> List Arg -> Maybe Float
+sc i args =
+    case List.drop i args of
+        a :: _ ->
+            resToMaybe (Value.toNumber (firstValue a))
+
+        [] ->
+            Nothing
+
+
+{-| An optional numeric argument: position `i`, or `d` if absent/non-numeric. -}
+opt : Int -> Float -> List Arg -> Float
+opt i d args =
+    Maybe.withDefault d (sc i args)
+
+
+num0 : Value -> Float
+num0 v =
+    case Value.toNumber v of
+        Ok n ->
+            n
+
+        Err _ ->
+            0
+
+
+firstErr : List Value -> Maybe Error
+firstErr vals =
+    List.head
+        (List.filterMap
+            (\v ->
+                case v of
+                    VError e ->
+                        Just e
+
+                    _ ->
+                        Nothing
+            )
+            vals
+        )
+
+
+nthF : Int -> List Float -> Float
+nthF i list =
+    Maybe.withDefault 0 (List.head (List.drop i list))
+
+
+firstIndexWhere : (a -> Bool) -> List a -> Maybe Int
+firstIndexWhere pred xs =
+    firstIndexHelp pred xs 0
+
+
+firstIndexHelp : (a -> Bool) -> List a -> Int -> Maybe Int
+firstIndexHelp pred xs i =
+    case xs of
+        [] ->
+            Nothing
+
+        x :: rest ->
+            if pred x then
+                Just i
+
+            else
+                firstIndexHelp pred rest (i + 1)
+
+
+sumProduct : List Arg -> Value
+sumProduct args =
+    let
+        flats =
+            List.map (\a -> flatten [ a ]) args
+    in
+    case firstErr (List.concat flats) of
+        Just e ->
+            VError e
+
+        Nothing ->
+            case flats of
+                [] ->
+                    VNumber 0
+
+                first :: _ ->
+                    let
+                        len =
+                            List.length first
+
+                        nums =
+                            List.map (List.map num0) flats
+                    in
+                    if List.all (\l -> List.length l == len) flats then
+                        VNumber (List.sum (List.foldl (List.map2 (*)) (List.repeat len 1) nums))
+
+                    else
+                        VError ValueErr
+
+
+toPairs : List Arg -> List ( Arg, String )
+toPairs args =
+    case args of
+        r :: c :: rest ->
+            ( r, Value.toText (firstValue c) ) :: toPairs rest
+
+        _ ->
+            []
+
+
+masksOf : List ( Arg, String ) -> List (List Bool)
+masksOf pairs =
+    List.map (\( rangeArg, crit ) -> List.map (matchCriteria crit) (flatten [ rangeArg ])) pairs
+
+
+boolAt : Int -> List Bool -> Bool
+boolAt i bs =
+    Maybe.withDefault False (List.head (List.drop i bs))
+
+
+matchIdx : Int -> List (List Bool) -> List Int
+matchIdx n masks =
+    List.filter (\i -> List.all (boolAt i) masks) (List.range 0 (n - 1))
+
+
+countIfs : List Arg -> Value
+countIfs args =
+    let
+        pairs =
+            toPairs args
+
+        n =
+            case pairs of
+                ( r, _ ) :: _ ->
+                    List.length (flatten [ r ])
+
+                [] ->
+                    0
+    in
+    VNumber (toFloat (List.length (matchIdx n (masksOf pairs))))
+
+
+numAt : Int -> List Value -> Maybe Float
+numAt i vals =
+    case List.head (List.drop i vals) of
+        Just (VNumber x) ->
+            Just x
+
+        _ ->
+            Nothing
+
+
+selectedNums : List Arg -> Maybe (List Float)
+selectedNums args =
+    case args of
+        sumArg :: rest ->
+            let
+                pairs =
+                    toPairs rest
+
+                sumVals =
+                    flatten [ sumArg ]
+
+                idx =
+                    matchIdx (List.length sumVals) (masksOf pairs)
+            in
+            Just (List.filterMap (\i -> numAt i sumVals) idx)
+
+        _ ->
+            Nothing
+
+
+sumIfs : List Arg -> Value
+sumIfs args =
+    case selectedNums args of
+        Just ns ->
+            VNumber (List.sum ns)
+
+        Nothing ->
+            VError ValueErr
+
+
+averageIfs : List Arg -> Value
+averageIfs args =
+    case selectedNums args of
+        Just [] ->
+            VError DivZero
+
+        Just ns ->
+            VNumber (List.sum ns / toFloat (List.length ns))
+
+        Nothing ->
+            VError ValueErr
+
+
+minMaxIfs : Bool -> List Arg -> Value
+minMaxIfs isMin args =
+    case selectedNums args of
+        Just [] ->
+            VNumber 0
+
+        Just (n :: rest) ->
+            VNumber
+                (List.foldl
+                    (if isMin then
+                        Basics.min
+
+                     else
+                        Basics.max
+                    )
+                    n
+                    rest
+                )
+
+        Nothing ->
+            VError ValueErr
+
+
+subtotal : List Arg -> Value
+subtotal args =
+    case args of
+        fArg :: rest ->
+            case Value.toNumber (firstValue fArg) of
+                Ok f ->
+                    case modBy 100 (round f) of
+                        1 ->
+                            call "AVERAGE" rest
+
+                        2 ->
+                            call "COUNT" rest
+
+                        3 ->
+                            call "COUNTA" rest
+
+                        4 ->
+                            call "MAX" rest
+
+                        5 ->
+                            call "MIN" rest
+
+                        6 ->
+                            call "PRODUCT" rest
+
+                        7 ->
+                            call "STDEV" rest
+
+                        8 ->
+                            call "STDEVP" rest
+
+                        9 ->
+                            call "SUM" rest
+
+                        10 ->
+                            call "VAR" rest
+
+                        11 ->
+                            call "VARP" rest
+
+                        _ ->
+                            VError ValueErr
+
+                Err e ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+percentileFn : List Arg -> Value
+percentileFn args =
+    case args of
+        arrArg :: kArg :: _ ->
+            case ( collectNumbers [ arrArg ], Value.toNumber (firstValue kArg) ) of
+                ( Ok nums, Ok k ) ->
+                    percentileInc (List.sort nums) k
+
+                ( Err e, _ ) ->
+                    VError e
+
+                ( _, Err e ) ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+percentileInc : List Float -> Float -> Value
+percentileInc sorted k =
+    if k < 0 || k > 1 then
+        VError NumErr
+
+    else
+        case sorted of
+            [] ->
+                VError NumErr
+
+            _ ->
+                let
+                    rank =
+                        k * toFloat (List.length sorted - 1)
+
+                    lo =
+                        floor rank
+
+                    frac =
+                        rank - toFloat lo
+
+                    a =
+                        nthF lo sorted
+
+                    b =
+                        nthF (lo + 1) sorted
+                in
+                VNumber (a + frac * (b - a))
+
+
+quartileFn : List Arg -> Value
+quartileFn args =
+    case args of
+        arrArg :: qArg :: _ ->
+            case Value.toNumber (firstValue qArg) of
+                Ok q ->
+                    percentileFn [ arrArg, Scalar (VNumber (q / 4)) ]
+
+                Err e ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+rankFn : List Arg -> Value
+rankFn args =
+    case args of
+        vArg :: arrArg :: rest ->
+            case ( Value.toNumber (firstValue vArg), collectNumbers [ arrArg ] ) of
+                ( Ok v, Ok nums ) ->
+                    let
+                        ascending =
+                            case rest of
+                                o :: _ ->
+                                    opt 0 0 [ o ] /= 0
+
+                                [] ->
+                                    False
+
+                        ordered =
+                            if ascending then
+                                List.sort nums
+
+                            else
+                                List.reverse (List.sort nums)
+                    in
+                    case firstIndexWhere (\x -> x == v) ordered of
+                        Just i ->
+                            VNumber (toFloat (i + 1))
+
+                        Nothing ->
+                            VError NA
+
+                ( Err e, _ ) ->
+                    VError e
+
+                ( _, Err e ) ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+xlookup : List Arg -> Value
+xlookup args =
+    case args of
+        keyArg :: lookArg :: retArg :: rest ->
+            let
+                key =
+                    firstValue keyArg
+
+                looks =
+                    flatten [ lookArg ]
+
+                rets =
+                    flatten [ retArg ]
+            in
+            case firstIndexWhere (\v -> Value.equalValue v key) looks of
+                Just i ->
+                    Maybe.withDefault (VError NA) (List.head (List.drop i rets))
+
+                Nothing ->
+                    case rest of
+                        nf :: _ ->
+                            firstValue nf
+
+                        [] ->
+                            VError NA
+
+        _ ->
+            VError ValueErr
+
+
+financeFn : (Float -> Float -> Float -> Float -> Float -> Float) -> List Arg -> Value
+financeFn f args =
+    case ( sc 0 args, sc 1 args, sc 2 args ) of
+        ( Just a, Just b, Just c ) ->
+            let
+                r =
+                    f a b c (opt 3 0 args) (opt 4 0 args)
+            in
+            if isNaN r || isInfinite r then
+                VError NumErr
+
+            else
+                VNumber r
+
+        _ ->
+            VError ValueErr
+
+
+pmt : Float -> Float -> Float -> Float -> Float -> Float
+pmt rate nperiods presentValue futureValue typ =
+    if rate == 0 then
+        if nperiods == 0 then
+            0 / 0
+
+        else
+            -(presentValue + futureValue) / nperiods
+
+    else
+        let
+            p =
+                (1 + rate) ^ nperiods
+        in
+        -(rate * (presentValue * p + futureValue)) / ((1 + rate * typ) * (p - 1))
+
+
+fv : Float -> Float -> Float -> Float -> Float -> Float
+fv rate nperiods payment presentValue typ =
+    if rate == 0 then
+        -(presentValue + payment * nperiods)
+
+    else
+        let
+            p =
+                (1 + rate) ^ nperiods
+        in
+        -(presentValue * p + payment * (1 + rate * typ) * (p - 1) / rate)
+
+
+pv : Float -> Float -> Float -> Float -> Float -> Float
+pv rate nperiods payment futureValue typ =
+    if rate == 0 then
+        -(futureValue + payment * nperiods)
+
+    else
+        let
+            p =
+                (1 + rate) ^ nperiods
+        in
+        -(futureValue + payment * (1 + rate * typ) * (p - 1) / rate) / p
+
+
+nper : Float -> Float -> Float -> Float -> Float -> Float
+nper rate payment presentValue futureValue typ =
+    if rate == 0 then
+        if payment == 0 then
+            0 / 0
+
+        else
+            -(presentValue + futureValue) / payment
+
+    else
+        let
+            adj =
+                payment * (1 + rate * typ)
+        in
+        logBase (1 + rate) ((adj - futureValue * rate) / (adj + presentValue * rate))
+
+
+{-| Numbers in their natural row-major order (unlike `collectNumbers`, which reverses
+within a matrix — fine for commutative aggregates but wrong for ordered cash flows). -}
+orderedNumbers : List Arg -> Result Error (List Float)
+orderedNumbers args =
+    let
+        vals =
+            flatten args
+    in
+    case firstErr vals of
+        Just e ->
+            Err e
+
+        Nothing ->
+            Ok (numbersOnly vals)
+
+
+npvFn : List Arg -> Value
+npvFn args =
+    case args of
+        rateArg :: rest ->
+            case Value.toNumber (firstValue rateArg) of
+                Ok rate ->
+                    case orderedNumbers rest of
+                        Ok nums ->
+                            VNumber (npvAt rate 1 nums)
+
+                        Err e ->
+                            VError e
+
+                Err e ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+npvAt : Float -> Int -> List Float -> Float
+npvAt rate startExp nums =
+    List.sum (List.indexedMap (\i v -> v / (1 + rate) ^ toFloat (i + startExp)) nums)
+
+
+irrFn : List Arg -> Value
+irrFn args =
+    case args of
+        valsArg :: rest ->
+            case orderedNumbers [ valsArg ] of
+                Ok nums ->
+                    let
+                        guess =
+                            case rest of
+                                g :: _ ->
+                                    opt 0 0.1 [ g ]
+
+                                [] ->
+                                    0.1
+                    in
+                    case newton (\r -> npvAt r 0 nums) guess 0 of
+                        Just r ->
+                            VNumber r
+
+                        Nothing ->
+                            VError NumErr
+
+                Err e ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+newton : (Float -> Float) -> Float -> Int -> Maybe Float
+newton f x iter =
+    if iter > 100 then
+        Nothing
+
+    else
+        let
+            fx =
+                f x
+        in
+        if isNaN fx || isInfinite fx then
+            Nothing
+
+        else if abs fx < 1.0e-7 then
+            Just x
+
+        else
+            let
+                d =
+                    (f (x + 1.0e-6) - fx) / 1.0e-6
+            in
+            if d == 0 then
+                Nothing
+
+            else
+                let
+                    nx =
+                        x - fx / d
+                in
+                newton f
+                    (if nx <= -0.9999 then
+                        -0.9999
+
+                     else
+                        nx
+                    )
+                    (iter + 1)

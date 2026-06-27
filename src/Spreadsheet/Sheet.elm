@@ -30,6 +30,7 @@ module Spreadsheet.Sheet exposing
     , key
     , keyToRef
     , formulaCells
+    , occupiedRefs
     , defaultColWidth
     , colWidth
     , setColWidth
@@ -48,6 +49,18 @@ module Spreadsheet.Sheet exposing
     , clearName
     , nameOf
     , definedNames
+    , setNote
+    , noteAt
+    , mergeCells
+    , unmerge
+    , mergeAnchorAt
+    , mergeContaining
+    , isCovered
+    , addValidation
+    , validationAt
+    , validate
+    , isInvalid
+    , dropdownAt
     )
 
 {-| The spreadsheet model and its (synchronous) recalculation engine.
@@ -88,6 +101,7 @@ import Spreadsheet.Ref as Ref exposing (Range, Ref)
 import Spreadsheet.Refactor as Refactor
 import Spreadsheet.Render as Render
 import Spreadsheet.Style as Style exposing (CellStyle, ColorScale, DataBar, Rendered, Rule)
+import Spreadsheet.Validation as Validation
 import Spreadsheet.Value as Value exposing (Value(..))
 
 
@@ -123,7 +137,15 @@ type alias Model =
     , dataBars : List DataBar
     , colWidths : Dict Int Int
     , names : Dict String Range
+    , notes : Dict ( Int, Int ) String
+    , merges : List Range
+    , validations : List Valid
     }
+
+
+{-| A validation rule scoped to a range. -}
+type alias Valid =
+    { range : Range, rule : Validation.Rule }
 
 
 {-| An empty sheet of the given dimensions. -}
@@ -138,6 +160,9 @@ empty rows cols =
         , dataBars = []
         , colWidths = Dict.empty
         , names = Dict.empty
+        , notes = Dict.empty
+        , merges = []
+        , validations = []
         }
 
 
@@ -319,6 +344,14 @@ addDataBar db (Sheet m) =
 
 
 -- DEPENDENCIES ---------------------------------------------------------------
+
+
+{-| Every occupied cell's ref, in row-major order (top-to-bottom, left-to-right). -}
+occupiedRefs : Sheet -> List Ref
+occupiedRefs (Sheet m) =
+    Dict.keys m.cells
+        |> List.sortBy (\( c, r ) -> ( r, c ))
+        |> List.map keyToRef
 
 
 {-| Every formula cell's key. -}
@@ -531,10 +564,15 @@ runRecalc dirty sheet =
 {-| Insert `n` blank rows before row `at`. -}
 insertRows : Int -> Int -> Sheet -> Sheet
 insertRows at n (Sheet m) =
+    let
+        keyMap ( c, r ) =
+            Just ( c, insAt at n r )
+    in
     Sheet
         (adjustRanges (Refactor.insertRowsRange at n)
             { m
-                | cells = remapCells (\( c, r ) -> Just ( c, insAt at n r )) (Refactor.insertRows at n) m.cells
+                | cells = remapCells keyMap (Refactor.insertRows at n) m.cells
+                , notes = remapKeyDict keyMap m.notes
                 , rows = m.rows + n
             }
         )
@@ -543,10 +581,15 @@ insertRows at n (Sheet m) =
 {-| Delete `n` rows starting at row `at`. -}
 deleteRows : Int -> Int -> Sheet -> Sheet
 deleteRows at n (Sheet m) =
+    let
+        keyMap ( c, r ) =
+            Maybe.map (\r2 -> ( c, r2 )) (delAt at n r)
+    in
     Sheet
         (adjustRanges (Refactor.deleteRowsRange at n)
             { m
-                | cells = remapCells (\( c, r ) -> Maybe.map (\r2 -> ( c, r2 )) (delAt at n r)) (Refactor.deleteRows at n) m.cells
+                | cells = remapCells keyMap (Refactor.deleteRows at n) m.cells
+                , notes = remapKeyDict keyMap m.notes
                 , rows = max 1 (m.rows - n)
             }
         )
@@ -555,10 +598,15 @@ deleteRows at n (Sheet m) =
 {-| Insert `n` blank columns before column `at`. -}
 insertCols : Int -> Int -> Sheet -> Sheet
 insertCols at n (Sheet m) =
+    let
+        keyMap ( c, r ) =
+            Just ( insAt at n c, r )
+    in
     Sheet
         (adjustRanges (Refactor.insertColsRange at n)
             { m
-                | cells = remapCells (\( c, r ) -> Just ( insAt at n c, r )) (Refactor.insertCols at n) m.cells
+                | cells = remapCells keyMap (Refactor.insertCols at n) m.cells
+                , notes = remapKeyDict keyMap m.notes
                 , cols = m.cols + n
                 , colWidths = remapIntKeys (\c -> Just (insAt at n c)) m.colWidths
             }
@@ -568,10 +616,15 @@ insertCols at n (Sheet m) =
 {-| Delete `n` columns starting at column `at`. -}
 deleteCols : Int -> Int -> Sheet -> Sheet
 deleteCols at n (Sheet m) =
+    let
+        keyMap ( c, r ) =
+            Maybe.map (\c2 -> ( c2, r )) (delAt at n c)
+    in
     Sheet
         (adjustRanges (Refactor.deleteColsRange at n)
             { m
-                | cells = remapCells (\( c, r ) -> Maybe.map (\c2 -> ( c2, r )) (delAt at n c)) (Refactor.deleteCols at n) m.cells
+                | cells = remapCells keyMap (Refactor.deleteCols at n) m.cells
+                , notes = remapKeyDict keyMap m.notes
                 , cols = max 1 (m.cols - n)
                 , colWidths = remapIntKeys (delAt at n) m.colWidths
             }
@@ -634,6 +687,22 @@ remapIntKeys f d =
         d
 
 
+{-| Move the keys of a `(col,row)`-keyed dict (notes), dropping any that map to Nothing. -}
+remapKeyDict : (( Int, Int ) -> Maybe ( Int, Int )) -> Dict ( Int, Int ) v -> Dict ( Int, Int ) v
+remapKeyDict f d =
+    Dict.foldl
+        (\k v acc ->
+            case f k of
+                Just nk ->
+                    Dict.insert nk v acc
+
+                Nothing ->
+                    acc
+        )
+        Dict.empty
+        d
+
+
 {-| Apply a formula transform to a cell, refreshing its raw text from the rewritten tree
 and clearing its cached value (recompute on the next recalc). Literals are untouched. -}
 rewriteFormulaCell : (Expr -> Expr) -> Cell -> Cell
@@ -658,6 +727,8 @@ adjustRanges f m =
         | conditionals = List.filterMap (\rule -> Maybe.map (\rng -> { rule | range = rng }) (f rule.range)) m.conditionals
         , colorScales = List.filterMap (\cs -> Maybe.map (\rng -> { cs | range = rng }) (f cs.range)) m.colorScales
         , dataBars = List.filterMap (\db -> Maybe.map (\rng -> { db | range = rng }) (f db.range)) m.dataBars
+        , merges = List.filterMap f m.merges
+        , validations = List.filterMap (\vd -> Maybe.map (\rng -> { vd | range = rng }) (f vd.range)) m.validations
         , names =
             Dict.toList m.names
                 |> List.filterMap (\( nm, rng ) -> Maybe.map (\r -> ( nm, r )) (f rng))
@@ -988,6 +1059,144 @@ nameOf name (Sheet m) =
 definedNames : Sheet -> List ( String, Range )
 definedNames (Sheet m) =
     Dict.toList m.names
+
+
+
+-- NOTES ----------------------------------------------------------------------
+
+
+{-| Attach a note/comment to a cell (an empty string removes it). -}
+setNote : Ref -> String -> Sheet -> Sheet
+setNote ref note (Sheet m) =
+    if note == "" then
+        Sheet { m | notes = Dict.remove (key ref) m.notes }
+
+    else
+        Sheet { m | notes = Dict.insert (key ref) note m.notes }
+
+
+{-| The note on a cell, if any. -}
+noteAt : Ref -> Sheet -> Maybe String
+noteAt ref (Sheet m) =
+    Dict.get (key ref) m.notes
+
+
+
+-- MERGED CELLS ---------------------------------------------------------------
+
+
+{-| Merge a range into one block: the top-left cell is the anchor (it keeps its value);
+the other cells are cleared and hidden. Any existing merge overlapping the range is
+replaced. -}
+mergeCells : Range -> Sheet -> Sheet
+mergeCells range ((Sheet m) as sheet) =
+    let
+        n =
+            Ref.normalize range
+
+        kept =
+            List.filter (\mr -> not (rangesOverlap mr n)) m.merges
+
+        covered =
+            List.filter (\r -> r /= n.start) (Ref.cellsOf n)
+
+        cleared =
+            List.foldl (\r acc -> setRaw r "" acc) sheet covered
+    in
+    case cleared of
+        Sheet m2 ->
+            Sheet { m2 | merges = n :: kept }
+
+
+{-| Remove the merge that contains `ref` (no-op if the cell isn't merged). -}
+unmerge : Ref -> Sheet -> Sheet
+unmerge ref (Sheet m) =
+    Sheet { m | merges = List.filter (\mr -> not (Ref.contains mr ref)) m.merges }
+
+
+{-| If `ref` is the top-left anchor of a merge, the merged range (so the view can span it). -}
+mergeAnchorAt : Ref -> Sheet -> Maybe Range
+mergeAnchorAt ref (Sheet m) =
+    findFirst (\mr -> (Ref.normalize mr).start == ref) m.merges
+
+
+{-| The merge containing `ref` (anchor or covered), if any. -}
+mergeContaining : Ref -> Sheet -> Maybe Range
+mergeContaining ref (Sheet m) =
+    findFirst (\mr -> Ref.contains mr ref) m.merges
+
+
+{-| Is `ref` a non-anchor cell of a merge (hidden by the view)? -}
+isCovered : Ref -> Sheet -> Bool
+isCovered ref sheet =
+    case mergeContaining ref sheet of
+        Just mr ->
+            (Ref.normalize mr).start /= ref
+
+        Nothing ->
+            False
+
+
+rangesOverlap : Range -> Range -> Bool
+rangesOverlap a b =
+    let
+        x =
+            Ref.normalize a
+
+        y =
+            Ref.normalize b
+    in
+    x.start.col <= y.end.col && x.end.col >= y.start.col && x.start.row <= y.end.row && x.end.row >= y.start.row
+
+
+findFirst : (a -> Bool) -> List a -> Maybe a
+findFirst pred xs =
+    List.head (List.filter pred xs)
+
+
+
+-- DATA VALIDATION ------------------------------------------------------------
+
+
+{-| Attach a validation rule to a range. -}
+addValidation : Range -> Validation.Rule -> Sheet -> Sheet
+addValidation range rule (Sheet m) =
+    Sheet { m | validations = m.validations ++ [ { range = Ref.normalize range, rule = rule } ] }
+
+
+{-| The validation rule in force at a cell (the first whose range contains it). -}
+validationAt : Ref -> Sheet -> Maybe Validation.Rule
+validationAt ref (Sheet m) =
+    findFirst (\vd -> Ref.contains vd.range ref) m.validations
+        |> Maybe.map .rule
+
+
+{-| Would `input` be accepted in this cell? (True when there is no rule.) -}
+validate : Ref -> String -> Sheet -> Bool
+validate ref input sheet =
+    case validationAt ref sheet of
+        Just rule ->
+            Validation.check rule (Value.fromString input)
+
+        Nothing ->
+            True
+
+
+{-| Does the cell's *current* value violate its validation rule? (For flagging.) -}
+isInvalid : Ref -> Sheet -> Bool
+isInvalid ref sheet =
+    case validationAt ref sheet of
+        Just rule ->
+            not (Validation.check rule (valueAt ref sheet))
+
+        Nothing ->
+            False
+
+
+{-| The dropdown choices for a cell, if its validation is a list rule. -}
+dropdownAt : Ref -> Sheet -> Maybe (List String)
+dropdownAt ref sheet =
+    validationAt ref sheet |> Maybe.andThen Validation.options
 
 
 
