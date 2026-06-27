@@ -34,6 +34,7 @@ import Spreadsheet.Ref as Ref exposing (Range, Ref)
 import Spreadsheet.Refactor as Refactor
 import Spreadsheet.Render as Render
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
+import Spreadsheet.Spill as Spill
 import Spreadsheet.Style as Style
 import Spreadsheet.Validation as Validation
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
@@ -81,6 +82,7 @@ suite =
         , workbookTests
         , pivotTests
         , condFmtTests
+        , spillTests
         ]
 
 
@@ -1725,3 +1727,49 @@ hotStyle =
 hasHot : String -> Sheet -> Bool
 hasHot a1 s =
     List.member "hot" (Sheet.renderedStyle (at a1) s).classes
+
+
+
+-- DYNAMIC ARRAYS (SPILL) -----------------------------------------------------
+
+
+spillTests : Test
+spillTests =
+    describe "dynamic-array transforms"
+        [ test "unique keeps the first occurrence of each row" <|
+            \_ ->
+                Expect.equal [ [ VText "a" ], [ VText "b" ] ]
+                    (Spill.unique [ [ VText "a" ], [ VText "b" ], [ VText "a" ] ])
+        , test "sortBy orders rows by a column ascending" <|
+            \_ ->
+                Expect.equal [ [ VNumber 1 ], [ VNumber 2 ], [ VNumber 3 ] ]
+                    (Spill.sortBy 0 True [ [ VNumber 3 ], [ VNumber 1 ], [ VNumber 2 ] ])
+        , test "filter keeps matching rows" <|
+            \_ ->
+                Expect.equal [ [ VNumber 30 ], [ VNumber 40 ] ]
+                    (Spill.filter (\row -> List.any (\v -> Value.compare v (VNumber 25) == GT) row) [ [ VNumber 10 ], [ VNumber 30 ], [ VNumber 40 ] ])
+        , test "sequence counts up row-major" <|
+            \_ ->
+                Expect.equal (List.map (List.map normVal) [ [ VNumber 1, VNumber 2 ], [ VNumber 3, VNumber 4 ] ])
+                    (List.map (List.map normVal) (Spill.sequence 2 2 1 1))
+        , test "transpose flips rows and columns" <|
+            \_ ->
+                Expect.equal [ [ VNumber 1, VNumber 3 ], [ VNumber 2, VNumber 4 ] ]
+                    (Spill.transpose [ [ VNumber 1, VNumber 2 ], [ VNumber 3, VNumber 4 ] ])
+        , test "spillInto writes a block into empty cells" <|
+            \_ ->
+                case Sheet.spillInto (at "B1") (Spill.sequence 3 1 10 5) (Sheet.empty 10 5) of
+                    Just s ->
+                        Expect.equal (List.map normVal [ VNumber 10, VNumber 15, VNumber 20 ])
+                            (List.map (\a -> normVal (valOf a (Sheet.recalcAll s))) [ "B1", "B2", "B3" ])
+
+                    Nothing ->
+                        Expect.fail "expected the spill to fit"
+        , test "spillInto refuses to overwrite an occupied cell (#SPILL!)" <|
+            \_ ->
+                let
+                    occupied =
+                        sheetWith [ ( "B2", "x" ) ]
+                in
+                Expect.equal Nothing (Sheet.spillInto (at "B1") (Spill.sequence 3 1 10 5) occupied)
+        ]

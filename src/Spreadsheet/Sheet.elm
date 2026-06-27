@@ -34,6 +34,7 @@ module Spreadsheet.Sheet exposing
     , keyToRef
     , formulaCells
     , occupiedRefs
+    , valuesOf
     , defaultColWidth
     , colWidth
     , setColWidth
@@ -46,6 +47,7 @@ module Spreadsheet.Sheet exposing
     , fillDown
     , fillRight
     , fillSeries
+    , spillInto
     , sortRange
     , filterRows
     , defineName
@@ -222,6 +224,12 @@ valueAt ref (Sheet m) =
 
         Nothing ->
             VEmpty
+
+
+{-| A range's current values as a 2-D matrix (row-major), e.g. to feed `Spreadsheet.Spill`. -}
+valuesOf : Range -> Sheet -> List (List Value)
+valuesOf range sheet =
+    List.map (List.map (\r -> valueAt r sheet)) (Ref.rowsOf range)
 
 
 {-| The raw input at a ref (empty string if absent). -}
@@ -976,6 +984,33 @@ fillSeriesCol n col sheet =
                 )
                 sheet
                 (List.indexedMap (\i r -> ( i, r )) rows)
+
+
+{-| Write a computed 2-D block (a dynamic-array result, see `Spreadsheet.Spill`) with its
+top-left at `anchor`, as literal cells. Returns `Nothing` if any non-anchor target cell is
+already occupied — the `#SPILL!` condition. Recalculate afterwards. -}
+spillInto : Ref -> List (List Value) -> Sheet -> Maybe Sheet
+spillInto anchor matrix sheet =
+    let
+        targets =
+            List.concat
+                (List.indexedMap
+                    (\dr row ->
+                        List.indexedMap
+                            (\dc v -> ( { col = anchor.col + dc, row = anchor.row + dr }, v ))
+                            row
+                    )
+                    matrix
+                )
+
+        collides =
+            List.any (\( ref, _ ) -> ref /= anchor && rawAt ref sheet /= "") targets
+    in
+    if collides then
+        Nothing
+
+    else
+        Just (List.foldl (\( ref, v ) acc -> setRaw ref (Value.toText v) acc) sheet targets)
 
 
 {-| The leading run of numeric values down a column within the given rows. -}
