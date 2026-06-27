@@ -1,0 +1,2275 @@
+module Spreadsheet.Functions exposing
+    ( Arg(..)
+    , call
+    , isKnown
+    , flatten
+    , matrixOf
+    , firstValue
+    , matchCriteria
+    )
+
+{-| The built-in function library — the part of a spreadsheet engine that users think
+of as "the functions". Each entry maps a (already-evaluated) argument list to a result
+`Value`. Laziness-requiring forms (IF, IFERROR, CHOOSE, …) and reference-aware forms
+(ROW, COLUMN) are handled one level up in `Spreadsheet.Eval`; everything strict lives
+here so the table is a pure `String -> List Arg -> Value`.
+
+Arguments arrive as `Arg`, which preserves whether each came from a single value or a
+2-D range — `INDEX`, `VLOOKUP`, `MATCH` need the rectangle, while `SUM` just flattens.
+
+@docs Arg, call, isKnown, flatten, matrixOf, firstValue, matchCriteria
+
+-}
+
+import Spreadsheet.Value as Value exposing (Error(..), Value(..))
+
+
+{-| An evaluated argument: either a scalar value or a 2-D block of values (from a range
+reference or an array). -}
+type Arg
+    = Scalar Value
+    | Matrix (List (List Value))
+
+
+{-| Flatten every argument to a flat list of values (row-major), the form most
+aggregate functions want. -}
+flatten : List Arg -> List Value
+flatten args =
+    List.concatMap argValues args
+
+
+argValues : Arg -> List Value
+argValues arg =
+    case arg of
+        Scalar v ->
+            [ v ]
+
+        Matrix rows ->
+            List.concat rows
+
+
+{-| View any argument as a 2-D matrix (a scalar becomes 1×1). -}
+matrixOf : Arg -> List (List Value)
+matrixOf arg =
+    case arg of
+        Scalar v ->
+            [ [ v ] ]
+
+        Matrix rows ->
+            rows
+
+
+{-| The first value of an argument — a range used in scalar position collapses to its
+top-left cell (a deliberate simplification of Excel's implicit intersection). -}
+firstValue : Arg -> Value
+firstValue arg =
+    case arg of
+        Scalar v ->
+            v
+
+        Matrix rows ->
+            case rows of
+                (v :: _) :: _ ->
+                    v
+
+                _ ->
+                    VEmpty
+
+
+{-| Does the library know this (upper-cased) function name? Used to surface `#NAME?`
+distinctly from a runtime argument error. Includes the lazy/reference forms handled in
+`Spreadsheet.Eval`. -}
+isKnown : String -> Bool
+isKnown name =
+    List.member name knownNames
+
+
+knownNames : List String
+knownNames =
+    [ -- math / aggregate
+      "SUM", "SUMSQ", "PRODUCT", "AVERAGE", "AVERAGEA", "COUNT", "COUNTA"
+    , "COUNTBLANK", "MAX", "MIN", "MEDIAN", "MODE", "STDEV", "STDEVP", "VAR"
+    , "VARP", "LARGE", "SMALL", "ABS", "SIGN", "SQRT", "POWER", "EXP", "LN"
+    , "LOG10", "LOG", "MOD", "QUOTIENT", "INT", "TRUNC", "ROUND", "ROUNDUP"
+    , "ROUNDDOWN", "MROUND", "CEILING", "FLOOR", "PI", "FACT", "COMBIN", "GCD"
+    , "LCM"
+
+    -- trig
+    , "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2", "SINH", "COSH"
+    , "TANH", "DEGREES", "RADIANS"
+
+    -- conditional aggregates
+    , "COUNTIF", "SUMIF", "AVERAGEIF"
+
+    -- logical
+    , "AND", "OR", "XOR", "NOT", "TRUE", "FALSE", "IF", "IFS", "IFERROR"
+    , "IFNA", "SWITCH"
+
+    -- information
+    , "ISNUMBER", "ISTEXT", "ISBLANK", "ISLOGICAL", "ISERROR", "ISERR"
+    , "ISNA", "ISEVEN", "ISODD", "N", "NA", "TYPE"
+
+    -- text
+    , "CONCAT", "CONCATENATE", "TEXTJOIN", "LEN", "LEFT", "RIGHT", "MID"
+    , "UPPER", "LOWER", "TRIM", "CLEAN", "PROPER", "REPT", "REPLACE"
+    , "SUBSTITUTE", "FIND", "SEARCH", "EXACT", "VALUE", "CHAR", "CODE", "T"
+    , "TEXT"
+
+    -- lookup / reference
+    , "VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "CHOOSE", "ROWS", "COLUMNS"
+    , "ROW", "COLUMN"
+
+    -- date
+    , "DATE", "YEAR", "MONTH", "DAY", "WEEKDAY", "DAYS", "DATEVALUE"
+    ]
+
+
+
+-- DISPATCH -------------------------------------------------------------------
+
+
+{-| Evaluate a strict built-in. Unknown names yield `#NAME?`. -}
+call : String -> List Arg -> Value
+call name args =
+    let
+        vals =
+            flatten args
+    in
+    case name of
+        -- Math / aggregate ----------------------------------------------------
+        "SUM" ->
+            numAgg (List.foldl (+) 0) args
+
+        "SUMSQ" ->
+            numAgg (List.foldl (\x acc -> acc + x * x) 0) args
+
+        "PRODUCT" ->
+            numAgg (List.foldl (*) 1) args
+
+        "AVERAGE" ->
+            numAggNonEmpty average args
+
+        "AVERAGEA" ->
+            withNumbersA vals average
+
+        "COUNT" ->
+            VNumber (toFloat (List.length (numbersOnly vals)))
+
+        "COUNTA" ->
+            VNumber (toFloat (List.length (List.filter (\v -> v /= VEmpty) vals)))
+
+        "COUNTBLANK" ->
+            VNumber (toFloat (List.length (List.filter isBlank vals)))
+
+        "MAX" ->
+            numAggNonEmptyOr 0 (List.foldl Basics.max -inf) args
+
+        "MIN" ->
+            numAggNonEmptyOr 0 (List.foldl Basics.min inf) args
+
+        "MEDIAN" ->
+            statAgg median args
+
+        "MODE" ->
+            statAgg mode args
+
+        "STDEV" ->
+            statAgg (stdev True) args
+
+        "STDEVP" ->
+            statAgg (stdev False) args
+
+        "VAR" ->
+            statAgg (variance True) args
+
+        "VARP" ->
+            statAgg (variance False) args
+
+        "LARGE" ->
+            nthOrdered True args
+
+        "SMALL" ->
+            nthOrdered False args
+
+        "ABS" ->
+            unaryNum abs args
+
+        "SIGN" ->
+            unaryNum (\x -> toFloat (sign x)) args
+
+        "SQRT" ->
+            unaryNumChecked (\x -> if x < 0 then Err NumErr else Ok (sqrt x)) args
+
+        "POWER" ->
+            binNum (\a b -> a ^ b) args
+
+        "EXP" ->
+            unaryNum (\x -> e ^ x) args
+
+        "LN" ->
+            unaryNumChecked (\x -> if x <= 0 then Err NumErr else Ok (logBase e x)) args
+
+        "LOG10" ->
+            unaryNumChecked (\x -> if x <= 0 then Err NumErr else Ok (logBase 10 x)) args
+
+        "LOG" ->
+            logFn args
+
+        "MOD" ->
+            binNumChecked (\a b -> if b == 0 then Err DivZero else Ok (a - b * toFloat (floor (a / b)))) args
+
+        "QUOTIENT" ->
+            binNumChecked (\a b -> if b == 0 then Err DivZero else Ok (toFloat (truncate (a / b)))) args
+
+        "INT" ->
+            unaryNum (\x -> toFloat (floor x)) args
+
+        "TRUNC" ->
+            truncFn args
+
+        "ROUND" ->
+            roundFn roundHalfAway args
+
+        "ROUNDUP" ->
+            roundFn (\x -> ceiling (x - 1.0e-9)) args
+
+        "ROUNDDOWN" ->
+            roundFn (\x -> floor (x + 1.0e-9)) args
+
+        "MROUND" ->
+            binNumChecked (\x m -> if m == 0 then Ok 0 else Ok (toFloat (roundHalfAway (x / m)) * m)) args
+
+        "CEILING" ->
+            ceilingFloor (\x m -> toFloat (ceiling (x / m)) * m) args
+
+        "FLOOR" ->
+            ceilingFloor (\x m -> toFloat (floor (x / m)) * m) args
+
+        "PI" ->
+            VNumber pi
+
+        "FACT" ->
+            unaryNumChecked factorial args
+
+        "COMBIN" ->
+            combin args
+
+        "GCD" ->
+            intReduce gcdI 0 vals
+
+        "LCM" ->
+            intReduce lcmI 1 vals
+
+        -- Trig ----------------------------------------------------------------
+        "SIN" ->
+            unaryNum sin args
+
+        "COS" ->
+            unaryNum cos args
+
+        "TAN" ->
+            unaryNum tan args
+
+        "ASIN" ->
+            unaryNum asin args
+
+        "ACOS" ->
+            unaryNum acos args
+
+        "ATAN" ->
+            unaryNum atan args
+
+        "ATAN2" ->
+            binNum (\x y -> atan2 y x) args
+
+        "SINH" ->
+            unaryNum (\x -> (e ^ x - e ^ -x) / 2) args
+
+        "COSH" ->
+            unaryNum (\x -> (e ^ x + e ^ -x) / 2) args
+
+        "TANH" ->
+            unaryNum (\x -> (e ^ x - e ^ -x) / (e ^ x + e ^ -x)) args
+
+        "DEGREES" ->
+            unaryNum (\x -> x * 180 / pi) args
+
+        "RADIANS" ->
+            unaryNum (\x -> x * pi / 180) args
+
+        -- Conditional aggregates ---------------------------------------------
+        "COUNTIF" ->
+            countIf args
+
+        "SUMIF" ->
+            sumIf args
+
+        "AVERAGEIF" ->
+            averageIf args
+
+        -- Logical (strict) ----------------------------------------------------
+        "AND" ->
+            boolAgg (List.all identity) args
+
+        "OR" ->
+            boolAgg (List.any identity) args
+
+        "XOR" ->
+            boolAgg (\bs -> modBy 2 (List.length (List.filter identity bs)) == 1) args
+
+        "NOT" ->
+            case vals of
+                [ v ] ->
+                    case Value.toBool v of
+                        Ok b ->
+                            VBool (not b)
+
+                        Err er ->
+                            VError er
+
+                _ ->
+                    VError ValueErr
+
+        "TRUE" ->
+            VBool True
+
+        "FALSE" ->
+            VBool False
+
+        -- Information ---------------------------------------------------------
+        "ISNUMBER" ->
+            predicate isNumber vals
+
+        "ISTEXT" ->
+            predicate isText vals
+
+        "ISBLANK" ->
+            predicate isBlank vals
+
+        "ISLOGICAL" ->
+            predicate isLogical vals
+
+        "ISERROR" ->
+            predicate Value.isError vals
+
+        "ISERR" ->
+            predicate isErrNotNA vals
+
+        "ISNA" ->
+            predicate isNA vals
+
+        "ISEVEN" ->
+            intPredicate (\n -> modBy 2 n == 0) args
+
+        "ISODD" ->
+            intPredicate (\n -> modBy 2 n == 1) args
+
+        "N" ->
+            case vals of
+                [ v ] ->
+                    case Value.toNumber v of
+                        Ok n ->
+                            VNumber n
+
+                        Err _ ->
+                            VNumber 0
+
+                _ ->
+                    VError ValueErr
+
+        "NA" ->
+            VError NA
+
+        "TYPE" ->
+            case vals of
+                [ v ] ->
+                    VNumber (toFloat (typeCode v))
+
+                _ ->
+                    VError ValueErr
+
+        -- Text ----------------------------------------------------------------
+        "CONCAT" ->
+            VText (String.concat (List.map Value.toText vals))
+
+        "CONCATENATE" ->
+            VText (String.concat (List.map Value.toText vals))
+
+        "TEXTJOIN" ->
+            textJoin args
+
+        "LEN" ->
+            case vals of
+                [ v ] ->
+                    VNumber (toFloat (String.length (Value.toText v)))
+
+                _ ->
+                    VError ValueErr
+
+        "LEFT" ->
+            textSlice (\s n -> String.left n s) args
+
+        "RIGHT" ->
+            textSlice (\s n -> String.right n s) args
+
+        "MID" ->
+            midFn args
+
+        "UPPER" ->
+            unaryText String.toUpper vals
+
+        "LOWER" ->
+            unaryText String.toLower vals
+
+        "TRIM" ->
+            unaryText (collapseSpaces << String.trim) vals
+
+        "CLEAN" ->
+            unaryText (String.filter (\c -> Char.toCode c >= 32)) vals
+
+        "PROPER" ->
+            unaryText properCase vals
+
+        "REPT" ->
+            reptFn args
+
+        "REPLACE" ->
+            replaceFn args
+
+        "SUBSTITUTE" ->
+            substituteFn args
+
+        "FIND" ->
+            findFn True args
+
+        "SEARCH" ->
+            findFn False args
+
+        "EXACT" ->
+            case vals of
+                [ a, b ] ->
+                    VBool (Value.toText a == Value.toText b)
+
+                _ ->
+                    VError ValueErr
+
+        "VALUE" ->
+            case vals of
+                [ v ] ->
+                    case Value.toNumber v of
+                        Ok n ->
+                            VNumber n
+
+                        Err er ->
+                            VError er
+
+                _ ->
+                    VError ValueErr
+
+        "CHAR" ->
+            unaryNumChecked (\x -> Ok x) args
+                |> mapNumberToChar
+
+        "CODE" ->
+            case vals of
+                [ v ] ->
+                    case String.toList (Value.toText v) of
+                        c :: _ ->
+                            VNumber (toFloat (Char.toCode c))
+
+                        [] ->
+                            VError ValueErr
+
+                _ ->
+                    VError ValueErr
+
+        "T" ->
+            case vals of
+                [ VText s ] ->
+                    VText s
+
+                [ _ ] ->
+                    VText ""
+
+                _ ->
+                    VError ValueErr
+
+        -- Lookup --------------------------------------------------------------
+        "VLOOKUP" ->
+            vlookup args
+
+        "HLOOKUP" ->
+            hlookup args
+
+        "INDEX" ->
+            indexFn args
+
+        "MATCH" ->
+            matchFn args
+
+        "ROWS" ->
+            case args of
+                a :: _ ->
+                    VNumber (toFloat (List.length (matrixOf a)))
+
+                _ ->
+                    VError ValueErr
+
+        "COLUMNS" ->
+            case args of
+                a :: _ ->
+                    case matrixOf a of
+                        row :: _ ->
+                            VNumber (toFloat (List.length row))
+
+                        [] ->
+                            VNumber 0
+
+                _ ->
+                    VError ValueErr
+
+        -- Date ----------------------------------------------------------------
+        "DATE" ->
+            dateFn args
+
+        "YEAR" ->
+            datePart (\( y, _, _ ) -> y) args
+
+        "MONTH" ->
+            datePart (\( _, m, _ ) -> m) args
+
+        "DAY" ->
+            datePart (\( _, _, d ) -> d) args
+
+        "WEEKDAY" ->
+            weekdayFn args
+
+        "DAYS" ->
+            binNum (\endd startd -> endd - startd) args
+
+        "DATEVALUE" ->
+            case vals of
+                [ v ] ->
+                    case parseDateText (Value.toText v) of
+                        Just serial ->
+                            VNumber (toFloat serial)
+
+                        Nothing ->
+                            VError ValueErr
+
+                _ ->
+                    VError ValueErr
+
+        "_" ->
+            VError NameErr
+
+        _ ->
+            VError NameErr
+
+
+
+-- NUMERIC HELPERS ------------------------------------------------------------
+
+
+inf : Float
+inf =
+    1 / 0
+
+
+{-| Collect numbers per spreadsheet rules: scalar args coerce (text→#VALUE!, bool→1/0,
+empty→0); range cells ignore text/bool/empty; any error short-circuits. -}
+collectNumbers : List Arg -> Result Error (List Float)
+collectNumbers args =
+    List.foldr
+        (\arg acc ->
+            case acc of
+                Err er ->
+                    Err er
+
+                Ok nums ->
+                    case arg of
+                        Scalar v ->
+                            case Value.toNumber v of
+                                Ok n ->
+                                    Ok (n :: nums)
+
+                                Err er ->
+                                    Err er
+
+                        Matrix rows ->
+                            collectFromCells (List.concat rows) nums
+        )
+        (Ok [])
+        args
+
+
+collectFromCells : List Value -> List Float -> Result Error (List Float)
+collectFromCells cells acc =
+    case cells of
+        [] ->
+            Ok acc
+
+        v :: rest ->
+            case v of
+                VError er ->
+                    Err er
+
+                VNumber n ->
+                    collectFromCells rest (n :: acc)
+
+                _ ->
+                    collectFromCells rest acc
+
+
+numAgg : (List Float -> Float) -> List Arg -> Value
+numAgg f args =
+    case collectNumbers args of
+        Ok nums ->
+            VNumber (f nums)
+
+        Err er ->
+            VError er
+
+
+numAggNonEmpty : (List Float -> Maybe Float) -> List Arg -> Value
+numAggNonEmpty f args =
+    case collectNumbers args of
+        Ok nums ->
+            case f nums of
+                Just r ->
+                    VNumber r
+
+                Nothing ->
+                    VError DivZero
+
+        Err er ->
+            VError er
+
+
+numAggNonEmptyOr : Float -> (List Float -> Float) -> List Arg -> Value
+numAggNonEmptyOr fallback f args =
+    case collectNumbers args of
+        Ok nums ->
+            if List.isEmpty nums then
+                VNumber fallback
+
+            else
+                VNumber (f nums)
+
+        Err er ->
+            VError er
+
+
+{-| Aggregate over the flat numeric list (already filtered), erroring on an empty set —
+for MEDIAN/STDEV/VAR which need at least one (or two) numbers. -}
+statAgg : (List Float -> Result Error Float) -> List Arg -> Value
+statAgg f args =
+    case collectNumbers args of
+        Ok nums ->
+            case f nums of
+                Ok r ->
+                    VNumber r
+
+                Err er ->
+                    VError er
+
+        Err er ->
+            VError er
+
+
+numbersOnly : List Value -> List Float
+numbersOnly vals =
+    List.filterMap
+        (\v ->
+            case v of
+                VNumber n ->
+                    Just n
+
+                _ ->
+                    Nothing
+        )
+        vals
+
+
+average : List Float -> Maybe Float
+average nums =
+    case nums of
+        [] ->
+            Nothing
+
+        _ ->
+            Just (List.sum nums / toFloat (List.length nums))
+
+
+withNumbersA : List Value -> (List Float -> Maybe Float) -> Value
+withNumbersA vals f =
+    -- AVERAGEA: text counts as 0, booleans as 1/0.
+    let
+        nums =
+            List.filterMap
+                (\v ->
+                    case v of
+                        VEmpty ->
+                            Nothing
+
+                        VError _ ->
+                            Just 0
+
+                        _ ->
+                            Result.toMaybe (Value.toNumberLenient v)
+                                |> orElse (Just 0)
+                )
+                vals
+    in
+    case f nums of
+        Just r ->
+            VNumber r
+
+        Nothing ->
+            VError DivZero
+
+
+orElse : Maybe a -> Maybe a -> Maybe a
+orElse fallback m =
+    case m of
+        Just _ ->
+            m
+
+        Nothing ->
+            fallback
+
+
+median : List Float -> Result Error Float
+median nums =
+    case List.sort nums of
+        [] ->
+            Err NumErr
+
+        sorted ->
+            let
+                n =
+                    List.length sorted
+
+                mid =
+                    n // 2
+            in
+            if modBy 2 n == 1 then
+                Ok (nth mid sorted)
+
+            else
+                Ok ((nth (mid - 1) sorted + nth mid sorted) / 2)
+
+
+mode : List Float -> Result Error Float
+mode nums =
+    case nums of
+        [] ->
+            Err NA
+
+        _ ->
+            let
+                counts =
+                    List.map (\x -> ( x, List.length (List.filter (\y -> y == x) nums) )) nums
+
+                best =
+                    List.foldl
+                        (\( x, c ) acc ->
+                            case acc of
+                                Nothing ->
+                                    Just ( x, c )
+
+                                Just ( _, bc ) ->
+                                    if c > bc then
+                                        Just ( x, c )
+
+                                    else
+                                        acc
+                        )
+                        Nothing
+                        counts
+            in
+            case best of
+                Just ( x, c ) ->
+                    if c <= 1 then
+                        Err NA
+
+                    else
+                        Ok x
+
+                Nothing ->
+                    Err NA
+
+
+variance : Bool -> List Float -> Result Error Float
+variance sample nums =
+    let
+        n =
+            List.length nums
+    in
+    if n < 2 && sample then
+        Err DivZero
+
+    else if n < 1 then
+        Err DivZero
+
+    else
+        let
+            mean =
+                List.sum nums / toFloat n
+
+            ss =
+                List.sum (List.map (\x -> (x - mean) ^ 2) nums)
+
+            denom =
+                if sample then
+                    toFloat (n - 1)
+
+                else
+                    toFloat n
+        in
+        Ok (ss / denom)
+
+
+stdev : Bool -> List Float -> Result Error Float
+stdev sample nums =
+    Result.map sqrt (variance sample nums)
+
+
+nthOrdered : Bool -> List Arg -> Value
+nthOrdered largest args =
+    case args of
+        rangeArg :: kArg :: _ ->
+            case Value.toNumber (firstValue kArg) of
+                Ok kf ->
+                    let
+                        k =
+                            round kf
+
+                        sorted =
+                            List.sort (numbersOnly (flatten [ rangeArg ]))
+
+                        ordered =
+                            if largest then
+                                List.reverse sorted
+
+                            else
+                                sorted
+                    in
+                    if k >= 1 && k <= List.length ordered then
+                        VNumber (nth (k - 1) ordered)
+
+                    else
+                        VError NumErr
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+unaryNum : (Float -> Float) -> List Arg -> Value
+unaryNum f args =
+    case flatten args of
+        [ v ] ->
+            mapNum f v
+
+        _ ->
+            VError ValueErr
+
+
+unaryNumChecked : (Float -> Result Error Float) -> List Arg -> Value
+unaryNumChecked f args =
+    case flatten args of
+        [ v ] ->
+            case Value.toNumber v of
+                Ok n ->
+                    case f n of
+                        Ok r ->
+                            VNumber r
+
+                        Err er ->
+                            VError er
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+binNum : (Float -> Float -> Float) -> List Arg -> Value
+binNum f args =
+    binNumChecked (\a b -> Ok (f a b)) args
+
+
+binNumChecked : (Float -> Float -> Result Error Float) -> List Arg -> Value
+binNumChecked f args =
+    case flatten args of
+        [ a, b ] ->
+            case ( Value.toNumber a, Value.toNumber b ) of
+                ( Ok x, Ok y ) ->
+                    case f x y of
+                        Ok r ->
+                            VNumber r
+
+                        Err er ->
+                            VError er
+
+                ( Err er, _ ) ->
+                    VError er
+
+                ( _, Err er ) ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+mapNum : (Float -> Float) -> Value -> Value
+mapNum f v =
+    case Value.toNumber v of
+        Ok n ->
+            VNumber (f n)
+
+        Err er ->
+            VError er
+
+
+roundFn : (Float -> Int) -> List Arg -> Value
+roundFn rounder args =
+    let
+        ( value, digits ) =
+            twoNums args
+    in
+    case value of
+        Ok x ->
+            case digits of
+                Ok d ->
+                    let
+                        factor =
+                            10 ^ toFloat (round d)
+                    in
+                    VNumber (toFloat (rounder (x * factor)) / factor)
+
+                Err er ->
+                    VError er
+
+        Err er ->
+            VError er
+
+
+truncFn : List Arg -> Value
+truncFn args =
+    let
+        ( value, digits ) =
+            twoNumsOptional args 0
+    in
+    case ( value, digits ) of
+        ( Ok x, Ok d ) ->
+            let
+                factor =
+                    10 ^ toFloat (round d)
+            in
+            VNumber (toFloat (truncate (x * factor)) / factor)
+
+        ( Err er, _ ) ->
+            VError er
+
+        ( _, Err er ) ->
+            VError er
+
+
+ceilingFloor : (Float -> Float -> Float) -> List Arg -> Value
+ceilingFloor f args =
+    let
+        ( value, sig ) =
+            twoNumsOptional args 1
+    in
+    case ( value, sig ) of
+        ( Ok x, Ok m ) ->
+            if m == 0 then
+                VNumber 0
+
+            else
+                VNumber (f x m)
+
+        ( Err er, _ ) ->
+            VError er
+
+        ( _, Err er ) ->
+            VError er
+
+
+twoNums : List Arg -> ( Result Error Float, Result Error Float )
+twoNums args =
+    case flatten args of
+        [ a, b ] ->
+            ( Value.toNumber a, Value.toNumber b )
+
+        [ a ] ->
+            ( Value.toNumber a, Ok 0 )
+
+        _ ->
+            ( Err ValueErr, Err ValueErr )
+
+
+twoNumsOptional : List Arg -> Float -> ( Result Error Float, Result Error Float )
+twoNumsOptional args dflt =
+    case flatten args of
+        [ a, b ] ->
+            ( Value.toNumber a, Value.toNumber b )
+
+        [ a ] ->
+            ( Value.toNumber a, Ok dflt )
+
+        _ ->
+            ( Err ValueErr, Err ValueErr )
+
+
+logFn : List Arg -> Value
+logFn args =
+    case flatten args of
+        [ v ] ->
+            case Value.toNumber v of
+                Ok x ->
+                    if x <= 0 then
+                        VError NumErr
+
+                    else
+                        VNumber (logBase 10 x)
+
+                Err er ->
+                    VError er
+
+        [ v, b ] ->
+            case ( Value.toNumber v, Value.toNumber b ) of
+                ( Ok x, Ok base ) ->
+                    if x <= 0 || base <= 0 || base == 1 then
+                        VError NumErr
+
+                    else
+                        VNumber (logBase base x)
+
+                ( Err er, _ ) ->
+                    VError er
+
+                ( _, Err er ) ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+roundHalfAway : Float -> Int
+roundHalfAway x =
+    if x >= 0 then
+        floor (x + 0.5)
+
+    else
+        ceiling (x - 0.5)
+
+
+sign : Float -> Int
+sign x =
+    if x > 0 then
+        1
+
+    else if x < 0 then
+        -1
+
+    else
+        0
+
+
+factorial : Float -> Result Error Float
+factorial x =
+    let
+        n =
+            round x
+    in
+    if x < 0 || toFloat n /= x then
+        Err NumErr
+
+    else
+        Ok (List.product (List.map toFloat (List.range 1 n)))
+
+
+combin : List Arg -> Value
+combin args =
+    case flatten args of
+        [ a, b ] ->
+            case ( Value.toNumber a, Value.toNumber b ) of
+                ( Ok nf, Ok kf ) ->
+                    let
+                        n =
+                            round nf
+
+                        k =
+                            round kf
+                    in
+                    if n < 0 || k < 0 || k > n then
+                        VError NumErr
+
+                    else
+                        VNumber (toFloat (binomial n k))
+
+                ( Err er, _ ) ->
+                    VError er
+
+                ( _, Err er ) ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+binomial : Int -> Int -> Int
+binomial n k =
+    let
+        kk =
+            min k (n - k)
+    in
+    List.foldl (\i acc -> acc * (n - i) // (i + 1)) 1 (List.range 0 (kk - 1))
+
+
+intReduce : (Int -> Int -> Int) -> Int -> List Value -> Value
+intReduce f start vals =
+    let
+        ints =
+            List.map (\v -> Value.toNumber v |> Result.map (\x -> abs (round x))) vals
+    in
+    case firstError ints of
+        Just er ->
+            VError er
+
+        Nothing ->
+            VNumber (toFloat (List.foldl (\v acc -> f acc v) start (List.filterMap Result.toMaybe ints)))
+
+
+gcdI : Int -> Int -> Int
+gcdI a b =
+    if b == 0 then
+        a
+
+    else
+        gcdI b (modBy b a)
+
+
+lcmI : Int -> Int -> Int
+lcmI a b =
+    if a == 0 || b == 0 then
+        0
+
+    else
+        abs (a * b) // gcdI a b
+
+
+firstError : List (Result Error a) -> Maybe Error
+firstError results =
+    List.foldl
+        (\r acc ->
+            case acc of
+                Just _ ->
+                    acc
+
+                Nothing ->
+                    case r of
+                        Err er ->
+                            Just er
+
+                        Ok _ ->
+                            Nothing
+        )
+        Nothing
+        results
+
+
+
+-- BOOLEAN / INFO HELPERS -----------------------------------------------------
+
+
+boolAgg : (List Bool -> Bool) -> List Arg -> Value
+boolAgg f args =
+    let
+        bs =
+            List.filterMap
+                (\v ->
+                    case v of
+                        VEmpty ->
+                            Nothing
+
+                        _ ->
+                            Result.toMaybe (Value.toBool v)
+                )
+                (flatten args)
+
+        anyErr =
+            firstError (List.map Value.toBool (List.filter (\v -> v /= VEmpty) (flatten args)))
+    in
+    case anyErr of
+        Just er ->
+            VError er
+
+        Nothing ->
+            if List.isEmpty bs then
+                VError ValueErr
+
+            else
+                VBool (f bs)
+
+
+predicate : (Value -> Bool) -> List Value -> Value
+predicate f vals =
+    case vals of
+        [ v ] ->
+            VBool (f v)
+
+        _ ->
+            VError ValueErr
+
+
+intPredicate : (Int -> Bool) -> List Arg -> Value
+intPredicate f args =
+    case flatten args of
+        [ v ] ->
+            case Value.toNumber v of
+                Ok n ->
+                    VBool (f (truncate n))
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+isNumber : Value -> Bool
+isNumber v =
+    case v of
+        VNumber _ ->
+            True
+
+        _ ->
+            False
+
+
+isText : Value -> Bool
+isText v =
+    case v of
+        VText _ ->
+            True
+
+        _ ->
+            False
+
+
+isBlank : Value -> Bool
+isBlank v =
+    v == VEmpty
+
+
+isLogical : Value -> Bool
+isLogical v =
+    case v of
+        VBool _ ->
+            True
+
+        _ ->
+            False
+
+
+isNA : Value -> Bool
+isNA v =
+    v == VError NA
+
+
+isErrNotNA : Value -> Bool
+isErrNotNA v =
+    Value.isError v && v /= VError NA
+
+
+typeCode : Value -> Int
+typeCode v =
+    case v of
+        VNumber _ ->
+            1
+
+        VText _ ->
+            2
+
+        VBool _ ->
+            4
+
+        VError _ ->
+            16
+
+        VEmpty ->
+            1
+
+
+
+-- TEXT HELPERS ---------------------------------------------------------------
+
+
+unaryText : (String -> String) -> List Value -> Value
+unaryText f vals =
+    case vals of
+        [ v ] ->
+            VText (f (Value.toText v))
+
+        _ ->
+            VError ValueErr
+
+
+textSlice : (String -> Int -> String) -> List Arg -> Value
+textSlice f args =
+    case flatten args of
+        [ s, n ] ->
+            case Value.toNumber n of
+                Ok nf ->
+                    if nf < 0 then
+                        VError ValueErr
+
+                    else
+                        VText (f (Value.toText s) (round nf))
+
+                Err er ->
+                    VError er
+
+        [ s ] ->
+            VText (f (Value.toText s) 1)
+
+        _ ->
+            VError ValueErr
+
+
+midFn : List Arg -> Value
+midFn args =
+    case flatten args of
+        [ s, startV, lenV ] ->
+            case ( Value.toNumber startV, Value.toNumber lenV ) of
+                ( Ok startf, Ok lenf ) ->
+                    let
+                        start =
+                            round startf
+
+                        len =
+                            round lenf
+                    in
+                    if start < 1 || len < 0 then
+                        VError ValueErr
+
+                    else
+                        VText (String.slice (start - 1) (start - 1 + len) (Value.toText s))
+
+                ( Err er, _ ) ->
+                    VError er
+
+                ( _, Err er ) ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+reptFn : List Arg -> Value
+reptFn args =
+    case flatten args of
+        [ s, n ] ->
+            case Value.toNumber n of
+                Ok nf ->
+                    VText (String.repeat (max 0 (round nf)) (Value.toText s))
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+replaceFn : List Arg -> Value
+replaceFn args =
+    case flatten args of
+        [ old, startV, lenV, new ] ->
+            case ( Value.toNumber startV, Value.toNumber lenV ) of
+                ( Ok startf, Ok lenf ) ->
+                    let
+                        s =
+                            Value.toText old
+
+                        start =
+                            round startf - 1
+
+                        len =
+                            round lenf
+                    in
+                    VText (String.left start s ++ Value.toText new ++ String.dropLeft (start + len) s)
+
+                ( Err er, _ ) ->
+                    VError er
+
+                ( _, Err er ) ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+substituteFn : List Arg -> Value
+substituteFn args =
+    case flatten args of
+        [ s, old, new ] ->
+            VText (String.replace (Value.toText old) (Value.toText new) (Value.toText s))
+
+        [ s, old, new, _ ] ->
+            -- instance number not honoured; replace all (documented simplification)
+            VText (String.replace (Value.toText old) (Value.toText new) (Value.toText s))
+
+        _ ->
+            VError ValueErr
+
+
+findFn : Bool -> List Arg -> Value
+findFn caseSensitive args =
+    case flatten args of
+        needleV :: hayV :: rest ->
+            let
+                needle =
+                    if caseSensitive then
+                        Value.toText needleV
+
+                    else
+                        String.toLower (Value.toText needleV)
+
+                hay =
+                    if caseSensitive then
+                        Value.toText hayV
+
+                    else
+                        String.toLower (Value.toText hayV)
+
+                startAt =
+                    case rest of
+                        n :: _ ->
+                            case Value.toNumber n of
+                                Ok nf ->
+                                    round nf - 1
+
+                                Err _ ->
+                                    0
+
+                        [] ->
+                            0
+            in
+            case indexOfFrom needle hay startAt of
+                Just i ->
+                    VNumber (toFloat (i + 1))
+
+                Nothing ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+textJoin : List Arg -> Value
+textJoin args =
+    case args of
+        delimArg :: skipArg :: rest ->
+            let
+                delim =
+                    Value.toText (firstValue delimArg)
+
+                skipEmpty =
+                    Result.withDefault True (Value.toBool (firstValue skipArg))
+
+                pieces =
+                    flatten rest
+                        |> List.filterMap
+                            (\v ->
+                                if skipEmpty && v == VEmpty then
+                                    Nothing
+
+                                else
+                                    Just (Value.toText v)
+                            )
+            in
+            VText (String.join delim pieces)
+
+        _ ->
+            VError ValueErr
+
+
+mapNumberToChar : Value -> Value
+mapNumberToChar v =
+    case v of
+        VNumber n ->
+            VText (String.fromChar (Char.fromCode (round n)))
+
+        _ ->
+            v
+
+
+collapseSpaces : String -> String
+collapseSpaces s =
+    String.words s |> String.join " "
+
+
+properCase : String -> String
+properCase s =
+    String.words s
+        |> List.map
+            (\w ->
+                String.left 1 (String.toUpper w) ++ String.dropLeft 1 (String.toLower w)
+            )
+        |> String.join " "
+
+
+
+-- LOOKUP HELPERS -------------------------------------------------------------
+
+
+vlookup : List Arg -> Value
+vlookup args =
+    case args of
+        keyArg :: tableArg :: idxArg :: rest ->
+            let
+                key =
+                    firstValue keyArg
+
+                table =
+                    matrixOf tableArg
+
+                colIndex =
+                    Value.toNumber (firstValue idxArg) |> Result.map round
+
+                approx =
+                    case rest of
+                        a :: _ ->
+                            Result.withDefault True (Value.toBool (firstValue a))
+
+                        [] ->
+                            True
+            in
+            case colIndex of
+                Ok ci ->
+                    lookupRows key table ci approx
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+lookupRows : Value -> List (List Value) -> Int -> Bool -> Value
+lookupRows key rows colIndex approx =
+    let
+        matchRow row =
+            case row of
+                first :: _ ->
+                    if approx then
+                        Value.compare first key /= GT
+
+                    else
+                        Value.equalValue first key
+
+                [] ->
+                    False
+
+        chosen =
+            if approx then
+                lastMatching matchRow rows
+
+            else
+                firstMatching matchRow rows
+    in
+    case chosen of
+        Just row ->
+            nthValue (colIndex - 1) row
+
+        Nothing ->
+            VError NA
+
+
+hlookup : List Arg -> Value
+hlookup args =
+    case args of
+        keyArg :: tableArg :: idxArg :: rest ->
+            let
+                transposed =
+                    transpose (matrixOf tableArg)
+
+                approx =
+                    case rest of
+                        a :: _ ->
+                            Result.withDefault True (Value.toBool (firstValue a))
+
+                        [] ->
+                            True
+            in
+            case Value.toNumber (firstValue idxArg) |> Result.map round of
+                Ok ri ->
+                    lookupRows (firstValue keyArg) transposed ri approx
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+indexFn : List Arg -> Value
+indexFn args =
+    case args of
+        matArg :: rest ->
+            let
+                rows =
+                    matrixOf matArg
+
+                ( rowN, colN ) =
+                    case rest of
+                        r :: c :: _ ->
+                            ( numArg r, numArg c )
+
+                        [ r ] ->
+                            ( numArg r, 1 )
+
+                        [] ->
+                            ( 1, 1 )
+            in
+            indexInto rows rowN colN
+
+        _ ->
+            VError ValueErr
+
+
+indexInto : List (List Value) -> Int -> Int -> Value
+indexInto rows rowN colN =
+    let
+        nrows =
+            List.length rows
+
+        ncols =
+            case rows of
+                r :: _ ->
+                    List.length r
+
+                [] ->
+                    0
+    in
+    if colN == 0 && nrows == 1 then
+        -- single row, INDEX(row, k) → kth column
+        case List.head rows of
+            Just row ->
+                nthValue (rowN - 1) row
+
+            Nothing ->
+                VError RefErr
+
+    else if colN == 0 && ncols == 1 then
+        -- single column, INDEX(col, k) → kth row
+        nthValue (rowN - 1) (List.filterMap List.head rows)
+
+    else
+        let
+            effCol =
+                if colN == 0 then
+                    1
+
+                else
+                    colN
+        in
+        case nthRow (rowN - 1) rows of
+            Just row ->
+                nthValue (effCol - 1) row
+
+            Nothing ->
+                VError RefErr
+
+
+matchFn : List Arg -> Value
+matchFn args =
+    case args of
+        keyArg :: rangeArg :: rest ->
+            let
+                key =
+                    firstValue keyArg
+
+                cells =
+                    flatten [ rangeArg ]
+
+                matchType =
+                    case rest of
+                        a :: _ ->
+                            Result.withDefault 1 (Value.toNumber (firstValue a) |> Result.map round)
+
+                        [] ->
+                            1
+            in
+            matchIn key cells matchType
+
+        _ ->
+            VError ValueErr
+
+
+matchIn : Value -> List Value -> Int -> Value
+matchIn key cells matchType =
+    let
+        indexed =
+            List.indexedMap (\i v -> ( i, v )) cells
+    in
+    if matchType == 0 then
+        case firstMatching (\( _, v ) -> Value.equalValue v key) indexed of
+            Just ( i, _ ) ->
+                VNumber (toFloat (i + 1))
+
+            Nothing ->
+                VError NA
+
+    else if matchType == 1 then
+        -- largest value ≤ key, assuming ascending
+        case lastMatching (\( _, v ) -> Value.compare v key /= GT) indexed of
+            Just ( i, _ ) ->
+                VNumber (toFloat (i + 1))
+
+            Nothing ->
+                VError NA
+
+    else
+        -- smallest value ≥ key, assuming descending
+        case firstMatching (\( _, v ) -> Value.compare v key /= LT) indexed of
+            Just ( i, _ ) ->
+                VNumber (toFloat (i + 1))
+
+            Nothing ->
+                VError NA
+
+
+numArg : Arg -> Int
+numArg arg =
+    case Value.toNumber (firstValue arg) of
+        Ok n ->
+            round n
+
+        Err _ ->
+            0
+
+
+
+-- CONDITIONAL AGGREGATES -----------------------------------------------------
+
+
+{-| Test a value against a criterion à la COUNTIF: a bare value means equality, a
+leading comparison operator (`>5`, `<>x`, `>=10`) compares, and `*`/`?` wildcards work
+for text equality. Exposed so conditional formatting can reuse it. -}
+matchCriteria : String -> Value -> Bool
+matchCriteria criterion value =
+    let
+        ( op, rhs ) =
+            splitCriterion (String.trim criterion)
+    in
+    case op of
+        "=" ->
+            criteriaEq rhs value
+
+        "<>" ->
+            not (criteriaEq rhs value)
+
+        ">" ->
+            criteriaCompare value rhs GT
+
+        "<" ->
+            criteriaCompare value rhs LT
+
+        ">=" ->
+            criteriaCompareEq value rhs GT
+
+        "<=" ->
+            criteriaCompareEq value rhs LT
+
+        _ ->
+            criteriaEq criterion value
+
+
+splitCriterion : String -> ( String, String )
+splitCriterion s =
+    if String.startsWith ">=" s then
+        ( ">=", String.dropLeft 2 s )
+
+    else if String.startsWith "<=" s then
+        ( "<=", String.dropLeft 2 s )
+
+    else if String.startsWith "<>" s then
+        ( "<>", String.dropLeft 2 s )
+
+    else if String.startsWith ">" s then
+        ( ">", String.dropLeft 1 s )
+
+    else if String.startsWith "<" s then
+        ( "<", String.dropLeft 1 s )
+
+    else if String.startsWith "=" s then
+        ( "=", String.dropLeft 1 s )
+
+    else
+        ( "", s )
+
+
+criteriaEq : String -> Value -> Bool
+criteriaEq rhs value =
+    case String.toFloat (String.trim rhs) of
+        Just n ->
+            case Value.toNumber value of
+                Ok v ->
+                    v == n
+
+                Err _ ->
+                    False
+
+        Nothing ->
+            if String.contains "*" rhs || String.contains "?" rhs then
+                wildcardMatch (String.toLower rhs) (String.toLower (Value.toText value))
+
+            else
+                String.toLower (Value.toText value) == String.toLower rhs
+
+
+criteriaCompare : Value -> String -> Order -> Bool
+criteriaCompare value rhs want =
+    case ( Value.toNumber value, String.toFloat (String.trim rhs) ) of
+        ( Ok v, Just n ) ->
+            Basics.compare v n == want
+
+        _ ->
+            Basics.compare (Value.toText value) rhs == want
+
+
+criteriaCompareEq : Value -> String -> Order -> Bool
+criteriaCompareEq value rhs want =
+    criteriaCompare value rhs want
+        || criteriaCompare value rhs EQ
+        || (case ( Value.toNumber value, String.toFloat (String.trim rhs) ) of
+                ( Ok v, Just n ) ->
+                    v == n
+
+                _ ->
+                    Value.toText value == rhs
+           )
+
+
+countIf : List Arg -> Value
+countIf args =
+    case args of
+        rangeArg :: critArg :: _ ->
+            let
+                crit =
+                    Value.toText (firstValue critArg)
+            in
+            VNumber (toFloat (List.length (List.filter (matchCriteria crit) (flatten [ rangeArg ]))))
+
+        _ ->
+            VError ValueErr
+
+
+sumIf : List Arg -> Value
+sumIf args =
+    case args of
+        rangeArg :: critArg :: rest ->
+            let
+                crit =
+                    Value.toText (firstValue critArg)
+
+                testCells =
+                    flatten [ rangeArg ]
+
+                sumCells =
+                    case rest of
+                        sa :: _ ->
+                            flatten [ sa ]
+
+                        [] ->
+                            testCells
+
+                pairs =
+                    zip testCells sumCells
+            in
+            VNumber
+                (List.sum
+                    (List.filterMap
+                        (\( t, s ) ->
+                            if matchCriteria crit t then
+                                case s of
+                                    VNumber n ->
+                                        Just n
+
+                                    _ ->
+                                        Nothing
+
+                            else
+                                Nothing
+                        )
+                        pairs
+                    )
+                )
+
+        _ ->
+            VError ValueErr
+
+
+averageIf : List Arg -> Value
+averageIf args =
+    case args of
+        rangeArg :: critArg :: rest ->
+            let
+                crit =
+                    Value.toText (firstValue critArg)
+
+                testCells =
+                    flatten [ rangeArg ]
+
+                avgCells =
+                    case rest of
+                        sa :: _ ->
+                            flatten [ sa ]
+
+                        [] ->
+                            testCells
+
+                matched =
+                    List.filterMap
+                        (\( t, s ) ->
+                            if matchCriteria crit t then
+                                case s of
+                                    VNumber n ->
+                                        Just n
+
+                                    _ ->
+                                        Nothing
+
+                            else
+                                Nothing
+                        )
+                        (zip testCells avgCells)
+            in
+            case average matched of
+                Just r ->
+                    VNumber r
+
+                Nothing ->
+                    VError DivZero
+
+        _ ->
+            VError ValueErr
+
+
+wildcardMatch : String -> String -> Bool
+wildcardMatch pattern str =
+    wmatch (String.toList pattern) (String.toList str)
+
+
+wmatch : List Char -> List Char -> Bool
+wmatch pattern str =
+    case pattern of
+        [] ->
+            List.isEmpty str
+
+        '*' :: ps ->
+            wmatch ps str
+                || (case str of
+                        _ :: ss ->
+                            wmatch pattern ss
+
+                        [] ->
+                            False
+                   )
+
+        '?' :: ps ->
+            case str of
+                _ :: ss ->
+                    wmatch ps ss
+
+                [] ->
+                    False
+
+        p :: ps ->
+            case str of
+                s :: ss ->
+                    p == s && wmatch ps ss
+
+                [] ->
+                    False
+
+
+
+-- DATE HELPERS ---------------------------------------------------------------
+-- A clean proleptic-Gregorian serial model: DATE(1900,1,1) = 1. (We omit Excel's
+-- historical 1900-leap-year bug, so serials differ from Excel by 1 after Feb 1900.)
+
+
+dateEpoch : Int
+dateEpoch =
+    daysFromCivil 1899 12 31
+
+
+dateFn : List Arg -> Value
+dateFn args =
+    case flatten args of
+        [ y, m, d ] ->
+            case ( Value.toNumber y, Value.toNumber m, Value.toNumber d ) of
+                ( Ok yf, Ok mf, Ok df ) ->
+                    VNumber (toFloat (dateToSerial (round yf) (round mf) (round df)))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+dateToSerial : Int -> Int -> Int -> Int
+dateToSerial y m d =
+    -- normalise out-of-range months the way Excel does (month 13 → next January)
+    let
+        y2 =
+            y + (m - 1) // 12
+
+        m2 =
+            modBy 12 (m - 1) + 1
+    in
+    daysFromCivil y2 m2 d - dateEpoch
+
+
+serialToDate : Int -> ( Int, Int, Int )
+serialToDate serial =
+    civilFromDays (serial + dateEpoch)
+
+
+datePart : (( Int, Int, Int ) -> Int) -> List Arg -> Value
+datePart extract args =
+    case flatten args of
+        [ v ] ->
+            case Value.toNumber v of
+                Ok serial ->
+                    VNumber (toFloat (extract (serialToDate (round serial))))
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+weekdayFn : List Arg -> Value
+weekdayFn args =
+    case flatten args of
+        v :: _ ->
+            case Value.toNumber v of
+                Ok serial ->
+                    -- 1 = Sunday … 7 = Saturday (default type). Day 1 (1900-01-01) was a Monday.
+                    VNumber (toFloat (modBy 7 (round serial - 1 + 1) + 1))
+
+                Err er ->
+                    VError er
+
+        _ ->
+            VError ValueErr
+
+
+parseDateText : String -> Maybe Int
+parseDateText s =
+    case List.filterMap String.toInt (String.split "-" (String.trim s)) of
+        [ y, m, d ] ->
+            Just (dateToSerial y m d)
+
+        _ ->
+            case List.filterMap String.toInt (String.split "/" (String.trim s)) of
+                [ m, d, y ] ->
+                    Just (dateToSerial y m d)
+
+                _ ->
+                    Nothing
+
+
+{-| Days from 1970-01-01 (Howard Hinnant's civil-from-days, inverted). -}
+daysFromCivil : Int -> Int -> Int -> Int
+daysFromCivil y0 m d =
+    let
+        y =
+            if m <= 2 then
+                y0 - 1
+
+            else
+                y0
+
+        era =
+            (if y >= 0 then
+                y
+
+             else
+                y - 399
+            )
+                // 400
+
+        yoe =
+            y - era * 400
+
+        doy =
+            (153 * (if m > 2 then m - 3 else m + 9) + 2) // 5 + d - 1
+
+        doe =
+            yoe * 365 + yoe // 4 - yoe // 100 + doy
+    in
+    era * 146097 + doe - 719468
+
+
+civilFromDays : Int -> ( Int, Int, Int )
+civilFromDays z0 =
+    let
+        z =
+            z0 + 719468
+
+        era =
+            (if z >= 0 then
+                z
+
+             else
+                z - 146096
+            )
+                // 146097
+
+        doe =
+            z - era * 146097
+
+        yoe =
+            (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+
+        y =
+            yoe + era * 400
+
+        doy =
+            doe - (365 * yoe + yoe // 4 - yoe // 100)
+
+        mp =
+            (5 * doy + 2) // 153
+
+        d =
+            doy - (153 * mp + 2) // 5 + 1
+
+        m =
+            if mp < 10 then
+                mp + 3
+
+            else
+                mp - 9
+    in
+    ( if m <= 2 then
+        y + 1
+
+      else
+        y
+    , m
+    , d
+    )
+
+
+
+-- SMALL LIST UTILITIES -------------------------------------------------------
+
+
+nth : Int -> List Float -> Float
+nth i xs =
+    case List.drop i xs of
+        x :: _ ->
+            x
+
+        [] ->
+            0
+
+
+nthValue : Int -> List Value -> Value
+nthValue i xs =
+    case List.drop i xs of
+        x :: _ ->
+            x
+
+        [] ->
+            VError RefErr
+
+
+nthRow : Int -> List (List Value) -> Maybe (List Value)
+nthRow i xs =
+    List.head (List.drop i xs)
+
+
+firstMatching : (a -> Bool) -> List a -> Maybe a
+firstMatching f xs =
+    case xs of
+        [] ->
+            Nothing
+
+        x :: rest ->
+            if f x then
+                Just x
+
+            else
+                firstMatching f rest
+
+
+lastMatching : (a -> Bool) -> List a -> Maybe a
+lastMatching f xs =
+    List.foldl
+        (\x acc ->
+            if f x then
+                Just x
+
+            else
+                acc
+        )
+        Nothing
+        xs
+
+
+transpose : List (List a) -> List (List a)
+transpose rows =
+    case rows of
+        [] ->
+            []
+
+        [] :: _ ->
+            []
+
+        _ ->
+            let
+                heads =
+                    List.filterMap List.head rows
+
+                tails =
+                    List.map (List.drop 1) rows
+            in
+            heads :: transpose tails
+
+
+zip : List a -> List b -> List ( a, b )
+zip xs ys =
+    case ( xs, ys ) of
+        ( x :: xrest, y :: yrest ) ->
+            ( x, y ) :: zip xrest yrest
+
+        _ ->
+            []
+
+
+indexOfFrom : String -> String -> Int -> Maybe Int
+indexOfFrom needle hay startAt =
+    let
+        sliced =
+            String.dropLeft (max 0 startAt) hay
+    in
+    case String.indexes needle sliced of
+        i :: _ ->
+            Just (i + max 0 startAt)
+
+        [] ->
+            Nothing
