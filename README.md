@@ -21,10 +21,17 @@ engine is pure and effect-free, so it is fully unit-tested without a browser.
   `MATCH`, `XLOOKUP`, `CHOOSE`), `SUMPRODUCT`, `SUBTOTAL`, information (`ISNUMBER`, `TYPE`,
   …) and date (`DATE`, `YEAR`, `WEEKDAY`, …). Lazy forms (`IF`/`IFERROR`) don't evaluate the
   untaken branch; aggregates propagate errors and ignore text in ranges, as Excel does.
+- **Multiple sheets.** A `Workbook` of named sheets that reference one another with
+  `Data!A1` / `Data!A1:B5` cross-sheet formulas, recomputed to a fixed point so chains
+  across sheets settle.
 - **Workbook features.** Merge a range into one block (the anchor spans it); attach a
   **note** to a cell; **data validation** (dropdown list, number range, text length,
   not-blank) that flags offending values; **find & replace** across cells; **frozen**
-  header columns; and one-click **export** to TSV, Markdown, HTML or JSON.
+  header rows *and* columns; and one-click **export** to TSV, Markdown, HTML or JSON.
+- **Analytics.** **Pivot** a range (group-by + sum/count/avg/min/max); **dynamic-array**
+  transforms (`unique`/`sort`/`filter`/`sequence`/`transpose`) that spill a block
+  (`#SPILL!` on collision); range-aware **conditional formatting** (top/bottom-N,
+  above/below average, duplicate/unique); in-cell **sparklines**; and an **auto-filter**.
 - **Formatting.** `General`, `Number`, `Currency`, `Percent`, `Scientific`, `DateTime`
   and raw `Custom` Excel-style format codes (`#,##0.00`, `0.0%`, `yyyy-mm-dd`), shared
   with the `TEXT()` function.
@@ -79,13 +86,16 @@ src/Spreadsheet/
                  clipboard, autofill, sort/filter, named ranges, merges,
                  notes, validation
   Recalc.elm     async, visible-first incremental recalculation
+  Workbook.elm   multiple sheets + cross-sheet references + fix-point recalc
   Csv.elm        CSV import/export
   Export.elm     one-way export (TSV / Markdown / HTML / JSON)
   Find.elm       find & replace across cells
+  Pivot.elm      group-by + aggregate (pivot tables)
+  Spill.elm      dynamic-array transforms (unique/sort/filter/sequence/transpose)
   View.elm       the class-styled HTML grid
 src/Main.elm     a demo app (editing, formula bar, sync/async toggle)
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   265 tests
+test/SpreadsheetTest.elm   290 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -136,7 +146,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 265 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 290 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
