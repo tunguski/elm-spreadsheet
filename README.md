@@ -30,6 +30,11 @@ engine is pure and effect-free, so it is fully unit-tested without a browser.
   restyle everything — the demo includes a Solarized-beige theme); only data-driven values
   (colour, font, size, bar widths) are emitted inline. A `with*/toggle*/…Of` API on
   `Style` backs a Word-style formatting toolbar in the demo.
+- **Keyboard-driven grid.** The `View` grid is focusable and navigates like Excel/Sheets:
+  arrow keys move the selection, a printable key starts editing the cell, **Enter** commits
+  and moves down (**Shift+Enter** up), **Tab** commits and moves right (**Shift+Tab** left),
+  **Esc** cancels, and **Backspace/Delete** clears. Columns are resized by dragging the
+  border on a column header.
 - **Sync *and* async recalculation.** `recalcAll`/`recalcFrom` recompute synchronously in
   dependency order (with circular-reference detection → `#CIRC!`). For very large sheets,
   `Spreadsheet.Recalc` slices the same work into per-frame **batches** and computes the

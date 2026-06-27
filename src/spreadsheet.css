@@ -434,8 +434,41 @@ body {
 
 .ss-col-header {
     top: 0;
-    min-width: var(--ss-cell-w);
     height: var(--ss-cell-h);
+    position: sticky;
+    overflow: visible;
+}
+
+.ss-col-label {
+    display: block;
+    pointer-events: none;
+}
+
+/* Drag handle on the right edge of each column header. */
+.ss-resize {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 7px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 3;
+}
+
+.ss-resize:hover,
+.ss-resize:active {
+    background: var(--ss-accent);
+    opacity: 0.5;
+}
+
+/* The focusable grid container: hide the native outline; selection shows focus. */
+.ss-grid-focus {
+    outline: none;
+}
+
+.ss-grid-focus:focus,
+.ss-grid-focus:focus-visible {
+    outline: none;
 }
 
 .ss-row-header {

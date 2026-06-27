@@ -15,16 +15,19 @@ view and owns the recalculation lifecycle.
 -}
 
 import Browser
+import Browser.Dom
 import Browser.Events
 import Html exposing (Html, a, button, div, h1, h2, input, label, option, p, pre, section, select, span, text)
 import Html.Attributes as HA
 import Html.Events as HE
+import Json.Decode
 import Spreadsheet.Format as Format exposing (Format)
 import Spreadsheet.Recalc as Recalc
 import Spreadsheet.Ref as Ref exposing (Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 import Spreadsheet.Style as Style
 import Spreadsheet.View as View
+import Task
 
 
 main : Program () Model Msg
@@ -42,7 +45,19 @@ main =
 
 
 type alias Model =
-    { examples : List Example }
+    { examples : List Example
+    , drag : Maybe Drag
+    }
+
+
+{-| An in-progress column resize: which example/column, and the pointer/width it started
+at so each mouse move computes an absolute new width. -}
+type alias Drag =
+    { exampleId : Int
+    , col : Int
+    , startX : Float
+    , startW : Int
+    }
 
 
 {-| One embedded spreadsheet plus its UI state. -}
@@ -76,6 +91,7 @@ init _ =
             , exFormatting
             , exAsync
             ]
+      , drag = Nothing
       }
     , Cmd.none
     )
@@ -89,7 +105,12 @@ type Msg
     = Select Int Ref
     | StartEdit Int Ref
     | EditInput Int String
-    | EditKey Int String
+    | NavKey Int View.KeyEvent
+    | EditKey Int View.KeyEvent
+    | ResizeStart Int Int Float
+    | ResizeMove Float
+    | ResizeEnd
+    | NoOp
     | LoadBig Int
     | Frame Float
       -- formatting toolbar (acts on the example's selected cell)
@@ -108,24 +129,35 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         Select id ref ->
-            ( mapExample id (\e -> { e | selected = ref, editing = Nothing }) model, Cmd.none )
+            -- Clicking a cell commits any pending edit and focuses the grid so the
+            -- keyboard takes over immediately.
+            ( mapExample id (\e -> { e | selected = ref } |> commitPending) model, focusGrid id )
 
         StartEdit id ref ->
-            ( mapExample id (\e -> { e | selected = ref, editing = Just ( ref, Sheet.rawAt ref e.sheet ) }) model, Cmd.none )
+            ( mapExample id (\e -> { e | selected = ref, editing = Just ( ref, Sheet.rawAt ref e.sheet ) }) model
+            , focusEdit id
+            )
 
         EditInput id txt ->
             ( mapExample id (\e -> { e | editing = Maybe.map (\( r, _ ) -> ( r, txt )) e.editing }) model, Cmd.none )
 
-        EditKey id keyName ->
-            case keyName of
-                "Enter" ->
-                    ( mapExample id commitEditing model, Cmd.none )
+        NavKey id ke ->
+            navKey id ke model
 
-                "Escape" ->
-                    ( mapExample id (\e -> { e | editing = Nothing }) model, Cmd.none )
+        EditKey id ke ->
+            editKey id ke model
 
-                _ ->
-                    ( model, Cmd.none )
+        ResizeStart id col x ->
+            ( { model | drag = Just { exampleId = id, col = col, startX = x, startW = colWidthOf id col model } }, Cmd.none )
+
+        ResizeMove x ->
+            ( applyDrag x model, Cmd.none )
+
+        ResizeEnd ->
+            ( { model | drag = Nothing }, Cmd.none )
+
+        NoOp ->
+            ( model, Cmd.none )
 
         LoadBig id ->
             ( mapExample id loadBig model, Cmd.none )
@@ -204,15 +236,165 @@ restyle id f model =
         model
 
 
-{-| Commit the in-progress edit and recalculate (sync, or async for the big example). -}
-commitEditing : Example -> Example
-commitEditing e =
+{-| Commit the in-progress edit (if any) and recalculate. -}
+commitPending : Example -> Example
+commitPending e =
     case e.editing of
         Just ( ref, txt ) ->
             recalcExample [ ref ] { e | editing = Nothing, sheet = Sheet.setRaw ref txt e.sheet }
 
         Nothing ->
             e
+
+
+
+-- KEYBOARD NAVIGATION & EDITING ----------------------------------------------
+
+
+{-| Keys while the grid is focused (not editing): arrows move, Tab/Enter move (after
+nothing to commit), Backspace/Delete clear, and a printable key starts editing the cell
+with that character — like Excel/Sheets. -}
+navKey : Int -> View.KeyEvent -> Model -> ( Model, Cmd Msg )
+navKey id ke model =
+    case ke.key of
+        "ArrowUp" ->
+            ( mapExample id (moveSelected 0 (-1)) model, Cmd.none )
+
+        "ArrowDown" ->
+            ( mapExample id (moveSelected 0 1) model, Cmd.none )
+
+        "ArrowLeft" ->
+            ( mapExample id (moveSelected (-1) 0) model, Cmd.none )
+
+        "ArrowRight" ->
+            ( mapExample id (moveSelected 1 0) model, Cmd.none )
+
+        "Tab" ->
+            ( mapExample id (moveSelected (horiz ke) 0) model, Cmd.none )
+
+        "Enter" ->
+            ( mapExample id (moveSelected 0 (vert ke)) model, Cmd.none )
+
+        "Backspace" ->
+            ( mapExample id clearSelected model, Cmd.none )
+
+        "Delete" ->
+            ( mapExample id clearSelected model, Cmd.none )
+
+        _ ->
+            if String.length ke.key == 1 && not ke.ctrl && not ke.meta then
+                -- type-to-edit: open the cell seeded with the typed character
+                ( mapExample id (\e -> { e | editing = Just ( e.selected, ke.key ) }) model, focusEdit id )
+
+            else
+                ( model, Cmd.none )
+
+
+{-| Keys while editing a cell: Enter commits & moves down (Shift+Enter up), Tab commits &
+moves right (Shift+Tab left), Escape cancels — Excel/Sheets behaviour. -}
+editKey : Int -> View.KeyEvent -> Model -> ( Model, Cmd Msg )
+editKey id ke model =
+    case ke.key of
+        "Enter" ->
+            ( mapExample id (commitMove 0 (vert ke)) model, focusGrid id )
+
+        "Tab" ->
+            ( mapExample id (commitMove (horiz ke) 0) model, focusGrid id )
+
+        "Escape" ->
+            ( mapExample id (\e -> { e | editing = Nothing }) model, focusGrid id )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+horiz : View.KeyEvent -> Int
+horiz ke =
+    if ke.shift then
+        -1
+
+    else
+        1
+
+
+vert : View.KeyEvent -> Int
+vert ke =
+    if ke.shift then
+        -1
+
+    else
+        1
+
+
+moveSelected : Int -> Int -> Example -> Example
+moveSelected dc dr e =
+    { e
+        | selected =
+            { col = clamp 0 (e.cols - 1) (e.selected.col + dc)
+            , row = clamp 0 (e.rows - 1) (e.selected.row + dr)
+            }
+    }
+
+
+commitMove : Int -> Int -> Example -> Example
+commitMove dc dr e =
+    moveSelected dc dr (commitPending e)
+
+
+clearSelected : Example -> Example
+clearSelected e =
+    recalcExample [ e.selected ] { e | sheet = Sheet.setRaw e.selected "" e.sheet }
+
+
+
+-- FOCUS & RESIZE -------------------------------------------------------------
+
+
+gridDomId : Int -> String
+gridDomId id =
+    "ssgrid-" ++ String.fromInt id
+
+
+editDomId : Int -> String
+editDomId id =
+    gridDomId id ++ "-edit"
+
+
+focusGrid : Int -> Cmd Msg
+focusGrid id =
+    Task.attempt (\_ -> NoOp) (Browser.Dom.focus (gridDomId id))
+
+
+focusEdit : Int -> Cmd Msg
+focusEdit id =
+    Task.attempt (\_ -> NoOp) (Browser.Dom.focus (editDomId id))
+
+
+findExample : Int -> Model -> Maybe Example
+findExample id model =
+    List.head (List.filter (\e -> e.id == id) model.examples)
+
+
+colWidthOf : Int -> Int -> Model -> Int
+colWidthOf id col model =
+    case findExample id model of
+        Just e ->
+            Sheet.colWidth col e.sheet
+
+        Nothing ->
+            Sheet.defaultColWidth
+
+
+applyDrag : Float -> Model -> Model
+applyDrag x model =
+    case model.drag of
+        Just d ->
+            mapExample d.exampleId
+                (\e -> { e | sheet = Sheet.setColWidth d.col (d.startW + round (x - d.startX)) e.sheet })
+                model
+
+        Nothing ->
+            model
 
 
 recalcExample : List Ref -> Example -> Example
@@ -269,11 +451,31 @@ viewportOf e =
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    if List.any (\e -> e.async && not (Recalc.isDone e.recalc)) model.examples then
-        Browser.Events.onAnimationFrameDelta Frame
+    Sub.batch
+        [ if List.any (\e -> e.async && not (Recalc.isDone e.recalc)) model.examples then
+            Browser.Events.onAnimationFrameDelta Frame
 
-    else
-        Sub.none
+          else
+            Sub.none
+
+        -- While a column is being dragged, track the pointer globally so the drag keeps
+        -- working even when the cursor leaves the header.
+        , case model.drag of
+            Just _ ->
+                Sub.batch
+                    [ Browser.Events.onMouseMove clientXDecoder
+                    , Browser.Events.onMouseUp (Json.Decode.succeed ResizeEnd)
+                    ]
+
+            Nothing ->
+                Sub.none
+        ]
+
+
+clientXDecoder : Json.Decode.Decoder Msg
+clientXDecoder =
+    Json.Decode.field "clientX" Json.Decode.float
+        |> Json.Decode.andThen (\x -> Json.Decode.succeed (ResizeMove x))
 
 
 
@@ -576,7 +778,7 @@ header =
     div [ HA.class "page-head" ]
         [ h1 [] [ text "elm-spreadsheet" ]
         , p [ HA.class "page-lead" ]
-            [ text "A spreadsheet logic + view layer in Elm — values, ~100 formula functions, number formats, conditional styling, and sync/async recalculation. Every example below is a live, editable spreadsheet (double-click a cell to edit). They build up from the simplest use to the most involved." ]
+            [ text "A spreadsheet logic + view layer in Elm — values, ~100 formula functions, number formats, conditional styling, and sync/async recalculation. Every example below is a live, editable spreadsheet: click a cell and use the arrow keys, type to edit, Tab/Enter to move, and drag a column border to resize. They build up from the simplest use to the most involved." ]
         ]
 
 
@@ -742,14 +944,18 @@ asyncControls e =
 
 gridConfig : Example -> View.Config Msg
 gridConfig e =
-    { viewCols = e.cols
+    { id = gridDomId e.id
+    , viewCols = e.cols
     , viewRows = e.rows
     , selected = Just e.selected
     , editing = e.editing
+    , colWidth = \c -> Sheet.colWidth c e.sheet
     , onSelect = Select e.id
     , onStartEdit = StartEdit e.id
     , onEditInput = EditInput e.id
+    , onNavKey = NavKey e.id
     , onEditKey = EditKey e.id
+    , onResizeStart = ResizeStart e.id
     }
 
 

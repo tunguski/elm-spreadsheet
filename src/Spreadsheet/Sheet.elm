@@ -30,6 +30,9 @@ module Spreadsheet.Sheet exposing
     , key
     , keyToRef
     , formulaCells
+    , defaultColWidth
+    , colWidth
+    , setColWidth
     )
 
 {-| The spreadsheet model and its (synchronous) recalculation engine.
@@ -101,6 +104,7 @@ type alias Model =
     , conditionals : List Rule
     , colorScales : List ColorScale
     , dataBars : List DataBar
+    , colWidths : Dict Int Int
     }
 
 
@@ -114,7 +118,26 @@ empty rows cols =
         , conditionals = []
         , colorScales = []
         , dataBars = []
+        , colWidths = Dict.empty
         }
+
+
+{-| The width (px) a column has when the user hasn't resized it. -}
+defaultColWidth : Int
+defaultColWidth =
+    92
+
+
+{-| The current width (px) of a column. -}
+colWidth : Int -> Sheet -> Int
+colWidth col (Sheet m) =
+    Maybe.withDefault defaultColWidth (Dict.get col m.colWidths)
+
+
+{-| Set a column's width (px), clamped to a sensible minimum. -}
+setColWidth : Int -> Int -> Sheet -> Sheet
+setColWidth col px (Sheet m) =
+    Sheet { m | colWidths = Dict.insert col (max 32 px) m.colWidths }
 
 
 {-| `(rows, cols)` of the sheet. -}
