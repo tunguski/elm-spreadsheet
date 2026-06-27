@@ -399,8 +399,11 @@ loadBig e =
 
         loaded =
             Sheet.setRawMany edits e.sheet
+
+        ( started, state ) =
+            Recalc.beginAll (viewportOf e) loaded
     in
-    recalcExample [] { e | sheet = loaded }
+    { e | sheet = started, recalc = state, status = "Recalculating (async, visible-first)…" }
 
 
 
