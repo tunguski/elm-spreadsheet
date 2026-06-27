@@ -24,12 +24,16 @@ import Spreadsheet.Value exposing (Value)
 `RefE`/`RangeE` carry their `$`-absoluteness flags alongside the resolved coordinates, so
 copy/fill can shift only the relative parts and the serializer can reproduce the `$`
 markers. `NameE` is a defined-name reference (e.g. `TaxRate`) resolved against the sheet's
-name table at evaluation time. -}
+name table at evaluation time. `SheetRefE`/`SheetRangeE` are **cross-sheet** references
+(`Data!A1`, `Data!A1:B5`) carrying the other sheet's name; they are resolved against the
+workbook (`Spreadsheet.Workbook`) rather than the current sheet. -}
 type Expr
     = Lit Value
     | RefE Ref Abs
     | RangeE Range Abs Abs
     | NameE String
+    | SheetRefE String Ref Abs
+    | SheetRangeE String Range Abs Abs
     | Unary UnaryOp Expr
     | Binary BinaryOp Expr Expr
     | Func String (List Expr)

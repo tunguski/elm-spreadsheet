@@ -52,6 +52,12 @@ render e =
         NameE name ->
             ( name, atomP )
 
+        SheetRefE sheetName ref abs ->
+            ( sheetName ++ "!" ++ Ref.toA1Abs abs ref, atomP )
+
+        SheetRangeE sheetName range startAbs endAbs ->
+            ( sheetName ++ "!" ++ Ref.toA1Abs startAbs range.start ++ ":" ++ Ref.toA1Abs endAbs range.end, atomP )
+
         Func name args ->
             ( name ++ "(" ++ String.join "," (List.map expr args) ++ ")", atomP )
 

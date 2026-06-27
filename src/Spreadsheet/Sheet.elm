@@ -16,9 +16,11 @@ module Spreadsheet.Sheet exposing
     , addColorScale
     , addDataBar
     , recalcAll
+    , recalcAllWith
     , recalcFrom
     , recalcOrder
     , evalAndSet
+    , evalAndSetWith
     , markCircular
     , dirtyClosure
     , precedentsOf
@@ -489,7 +491,21 @@ isFormulaKey (Sheet m) k =
 {-| Evaluate a single formula cell against the sheet's current values and store the
 result. Literal cells are left untouched. -}
 evalAndSet : ( Int, Int ) -> Sheet -> Sheet
-evalAndSet k ((Sheet m) as sheet) =
+evalAndSet =
+    evalAndSetWith noExternal
+
+
+{-| A resolver that fails every cross-sheet reference — the default when a sheet is
+recalculated outside a workbook. -}
+noExternal : String -> Ref -> Value
+noExternal _ _ =
+    VError Value.RefErr
+
+
+{-| Like `evalAndSet`, but with a resolver for cross-sheet (`Sheet!A1`) references — the
+hook `Spreadsheet.Workbook` uses to evaluate references into other sheets. -}
+evalAndSetWith : (String -> Ref -> Value) -> ( Int, Int ) -> Sheet -> Sheet
+evalAndSetWith external k ((Sheet m) as sheet) =
     case Dict.get k m.cells of
         Just cell ->
             case cell.parsed of
@@ -499,6 +515,7 @@ evalAndSet k ((Sheet m) as sheet) =
                             { lookup = \r -> valueAt r sheet
                             , self = keyToRef k
                             , names = \name -> Dict.get name m.names
+                            , external = external
                             }
 
                         value =
@@ -533,6 +550,20 @@ markCircular ks sheet =
 recalcAll : Sheet -> Sheet
 recalcAll sheet =
     runRecalc (formulaCells sheet) sheet
+
+
+{-| Like `recalcAll`, but cross-sheet references resolve through `external` — used by
+`Spreadsheet.Workbook` to recompute one sheet against the workbook's current values. -}
+recalcAllWith : (String -> Ref -> Value) -> Sheet -> Sheet
+recalcAllWith external sheet =
+    let
+        ( ordered, cyclic ) =
+            recalcOrder (formulaCells sheet) sheet
+
+        evaluated =
+            List.foldl (evalAndSetWith external) sheet ordered
+    in
+    markCircular (Set.toList cyclic) evaluated
 
 
 {-| Synchronously recompute the cells affected by changes to `changed`. -}

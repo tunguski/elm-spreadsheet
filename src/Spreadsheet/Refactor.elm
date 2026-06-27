@@ -44,9 +44,13 @@ import Spreadsheet.Value exposing (Error(..), Value(..))
 
 {-| Rewrite every reference in `expr`. `fRef`/`fRange` return `Nothing` when the reference
 no longer exists, in which case it is replaced by a `#REF!` literal. The `$` flags ride
-along unchanged. -}
-mapRefs : (Ref -> Abs -> Maybe Ref) -> (Range -> Abs -> Abs -> Maybe Range) -> Expr -> Expr
-mapRefs fRef fRange e =
+along unchanged.
+
+`touchCross` decides what happens to cross-sheet references: copy/fill (`translate`) shifts
+their relative coordinates like any other ref (`touchCross = True`), but a structural edit
+on *this* sheet must leave references to *other* sheets alone (`touchCross = False`). -}
+mapRefs : Bool -> (Ref -> Abs -> Maybe Ref) -> (Range -> Abs -> Abs -> Maybe Range) -> Expr -> Expr
+mapRefs touchCross fRef fRange e =
     case e of
         Lit _ ->
             e
@@ -70,14 +74,38 @@ mapRefs fRef fRange e =
                 Nothing ->
                     Lit (VError RefErr)
 
+        SheetRefE name ref abs ->
+            if touchCross then
+                case fRef ref abs of
+                    Just r2 ->
+                        SheetRefE name r2 abs
+
+                    Nothing ->
+                        Lit (VError RefErr)
+
+            else
+                e
+
+        SheetRangeE name range startAbs endAbs ->
+            if touchCross then
+                case fRange range startAbs endAbs of
+                    Just r2 ->
+                        SheetRangeE name r2 startAbs endAbs
+
+                    Nothing ->
+                        Lit (VError RefErr)
+
+            else
+                e
+
         Unary op sub ->
-            Unary op (mapRefs fRef fRange sub)
+            Unary op (mapRefs touchCross fRef fRange sub)
 
         Binary op a b ->
-            Binary op (mapRefs fRef fRange a) (mapRefs fRef fRange b)
+            Binary op (mapRefs touchCross fRef fRange a) (mapRefs touchCross fRef fRange b)
 
         Func name args ->
-            Func name (List.map (mapRefs fRef fRange) args)
+            Func name (List.map (mapRefs touchCross fRef fRange) args)
 
 
 
@@ -88,7 +116,7 @@ mapRefs fRef fRange e =
 shift past the top-left edge yields `#REF!`. -}
 translate : Int -> Int -> Expr -> Expr
 translate dCol dRow =
-    mapRefs
+    mapRefs True
         (\ref abs -> shiftRef dCol dRow abs ref)
         (\range startAbs endAbs ->
             Maybe.map2 (\s e -> { start = s, end = e })
@@ -128,7 +156,7 @@ shiftRef dCol dRow abs ref =
 {-| Rewrite a formula for `n` columns inserted before column `idx`. -}
 insertCols : Int -> Int -> Expr -> Expr
 insertCols idx n =
-    mapRefs
+    mapRefs False
         (\ref _ -> Just { ref | col = insCoord idx n ref.col })
         (\range _ _ -> insertColsRange idx n range)
 
@@ -136,7 +164,7 @@ insertCols idx n =
 {-| Rewrite a formula for `n` rows inserted before row `idx`. -}
 insertRows : Int -> Int -> Expr -> Expr
 insertRows idx n =
-    mapRefs
+    mapRefs False
         (\ref _ -> Just { ref | row = insCoord idx n ref.row })
         (\range _ _ -> insertRowsRange idx n range)
 
@@ -175,7 +203,7 @@ insCoord idx n c =
 {-| Rewrite a formula for `n` columns deleted starting at column `idx`. -}
 deleteCols : Int -> Int -> Expr -> Expr
 deleteCols idx n =
-    mapRefs
+    mapRefs False
         (\ref _ -> Maybe.map (\c -> { ref | col = c }) (delCoord idx n ref.col))
         (\range _ _ -> deleteColsRange idx n range)
 
@@ -183,7 +211,7 @@ deleteCols idx n =
 {-| Rewrite a formula for `n` rows deleted starting at row `idx`. -}
 deleteRows : Int -> Int -> Expr -> Expr
 deleteRows idx n =
-    mapRefs
+    mapRefs False
         (\ref _ -> Maybe.map (\r -> { ref | row = r }) (delCoord idx n ref.row))
         (\range _ _ -> deleteRowsRange idx n range)
 

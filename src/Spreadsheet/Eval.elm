@@ -29,11 +29,13 @@ import Spreadsheet.Value as Value exposing (Error(..), Value(..))
 
 
 {-| What the evaluator needs from the sheet: read another cell's value (`lookup`), know
-which cell is being computed (`self`), and resolve a defined name to its range (`names`). -}
+which cell is being computed (`self`), resolve a defined name to its range (`names`), and
+read a cell on another sheet of the workbook (`external sheetName ref`). -}
 type alias Context =
     { lookup : Ref -> Value
     , self : Ref
     , names : String -> Maybe Range
+    , external : String -> Ref -> Value
     }
 
 
@@ -73,6 +75,17 @@ eval ctx expr =
 
                 Nothing ->
                     VError NameErr
+
+        SheetRefE sheetName ref _ ->
+            ctx.external sheetName ref
+
+        SheetRangeE sheetName range _ _ ->
+            case Ref.cellsOf range of
+                first :: _ ->
+                    ctx.external sheetName first
+
+                [] ->
+                    VError RefErr
 
         Unary op sub ->
             applyUnary op (eval ctx sub)
@@ -147,6 +160,9 @@ evalArg ctx expr =
 
                 Nothing ->
                     Scalar (VError NameErr)
+
+        SheetRangeE sheetName range _ _ ->
+            Matrix (List.map (List.map (ctx.external sheetName)) (Ref.rowsOf range))
 
         _ ->
             Scalar (eval ctx expr)

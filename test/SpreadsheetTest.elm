@@ -36,6 +36,7 @@ import Spreadsheet.Sheet as Sheet exposing (Sheet)
 import Spreadsheet.Style as Style
 import Spreadsheet.Validation as Validation
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
+import Spreadsheet.Workbook as Workbook
 import Test exposing (Test, describe, fuzz, fuzz2, test)
 
 
@@ -76,6 +77,7 @@ suite =
         , mergeTests
         , validationTests
         , findTests
+        , workbookTests
         ]
 
 
@@ -99,6 +101,7 @@ ctxFrom pairs =
     { lookup = \ref -> Maybe.withDefault VEmpty (Dict.get ( ref.col, ref.row ) d)
     , self = { col = 0, row = 0 }
     , names = \_ -> Nothing
+    , external = \_ _ -> VEmpty
     }
 
 
@@ -1511,3 +1514,105 @@ defs =
 findSheet : Sheet
 findSheet =
     sheetWith [ ( "A1", "apple" ), ( "B1", "apple pie" ), ( "C1", "grape" ), ( "A2", "Banana" ) ]
+
+
+
+-- WORKBOOK / CROSS-SHEET -----------------------------------------------------
+
+
+workbookTests : Test
+workbookTests =
+    describe "workbook / cross-sheet references"
+        [ test "a cross-sheet reference reads another sheet" <|
+            \_ ->
+                let
+                    data =
+                        Sheet.setRawMany [ ( at "A1", "10" ) ] (Sheet.empty 10 5)
+
+                    main =
+                        Sheet.setRawMany [ ( at "A1", "=Data!A1+5" ) ] (Sheet.empty 10 5)
+
+                    wb =
+                        Workbook.recalc (Workbook.init [ ( "Data", data ), ( "Main", main ) ])
+                in
+                expectVal (VNumber 15) (Workbook.valueAt "Main" (at "A1") wb)
+        , test "a cross-sheet range works in an aggregate" <|
+            \_ ->
+                let
+                    data =
+                        Sheet.setRawMany [ ( at "A1", "1" ), ( at "A2", "2" ), ( at "A3", "3" ) ] (Sheet.empty 10 5)
+
+                    main =
+                        Sheet.setRawMany [ ( at "B1", "=SUM(Data!A1:A3)" ) ] (Sheet.empty 10 5)
+
+                    wb =
+                        Workbook.recalc (Workbook.init [ ( "Data", data ), ( "Main", main ) ])
+                in
+                expectVal (VNumber 6) (Workbook.valueAt "Main" (at "B1") wb)
+        , test "cross-sheet chains settle to a fixed point" <|
+            \_ ->
+                let
+                    s3 =
+                        Sheet.setRawMany [ ( at "A1", "10" ) ] (Sheet.empty 10 5)
+
+                    s2 =
+                        Sheet.setRawMany [ ( at "A1", "=Sheet3!A1*2" ) ] (Sheet.empty 10 5)
+
+                    s1 =
+                        Sheet.setRawMany [ ( at "A1", "=Sheet2!A1+1" ) ] (Sheet.empty 10 5)
+
+                    wb =
+                        Workbook.recalc (Workbook.init [ ( "Sheet1", s1 ), ( "Sheet2", s2 ), ( "Sheet3", s3 ) ])
+                in
+                expectVal2 ( VNumber 20, VNumber 21 )
+                    ( Workbook.valueAt "Sheet2" (at "A1") wb, Workbook.valueAt "Sheet1" (at "A1") wb )
+        , test "sheet names are case-insensitive" <|
+            \_ ->
+                let
+                    data =
+                        Sheet.setRawMany [ ( at "A1", "7" ) ] (Sheet.empty 10 5)
+
+                    main =
+                        Sheet.setRawMany [ ( at "A1", "=DATA!A1" ) ] (Sheet.empty 10 5)
+
+                    wb =
+                        Workbook.recalc (Workbook.init [ ( "Data", data ), ( "Main", main ) ])
+                in
+                expectVal (VNumber 7) (Workbook.valueAt "Main" (at "A1") wb)
+        , test "a reference to an unknown sheet is #REF!" <|
+            \_ ->
+                let
+                    main =
+                        Sheet.setRawMany [ ( at "A1", "=Nope!A1" ) ] (Sheet.empty 10 5)
+
+                    wb =
+                        Workbook.recalc (Workbook.init [ ( "Main", main ) ])
+                in
+                expectVal (VError RefErr) (Workbook.valueAt "Main" (at "A1") wb)
+        , test "a single sheet recalculated alone fails cross-sheet refs" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.recalcAll (Sheet.setRawMany [ ( at "A1", "=Data!A1" ) ] (Sheet.empty 10 5))
+                in
+                expectVal (VError RefErr) (Sheet.valueAt (at "A1") s)
+        , test "cross-sheet references serialize round-trip" <|
+            \_ -> Expect.equal "Data!A1+Sheet2!B2:C3" (reformat "Data!A1+Sheet2!B2:C3")
+        , test "tab order, active sheet and setActive" <|
+            \_ ->
+                let
+                    wb =
+                        Workbook.init [ ( "One", Sheet.empty 5 5 ), ( "Two", Sheet.empty 5 5 ) ]
+                in
+                Expect.equal ( [ "One", "Two" ], "One", "Two" )
+                    ( Workbook.sheetNames wb, Workbook.activeName wb, Workbook.activeName (Workbook.setActive "Two" wb) )
+        , test "addSheet appends and removeSheet reassigns active" <|
+            \_ ->
+                let
+                    wb =
+                        Workbook.init [ ( "One", Sheet.empty 5 5 ) ]
+                            |> Workbook.addSheet "Two" (Sheet.empty 5 5)
+                            |> Workbook.removeSheet "One"
+                in
+                Expect.equal ( [ "Two" ], "Two" ) ( Workbook.sheetNames wb, Workbook.activeName wb )
+        ]

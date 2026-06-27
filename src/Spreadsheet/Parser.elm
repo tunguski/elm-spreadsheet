@@ -41,6 +41,7 @@ type Token
     | TRParen
     | TComma
     | TColon
+    | TBang
     | TPlus
     | TMinus
     | TStar
@@ -82,6 +83,9 @@ tokenizeHelp chars acc =
 
             else if c == ':' then
                 tokenizeHelp rest (TColon :: acc)
+
+            else if c == '!' then
+                tokenizeHelp rest (TBang :: acc)
 
             else if c == '+' then
                 tokenizeHelp rest (TPlus :: acc)
@@ -500,6 +504,17 @@ parsePrimary tokens =
 
 parseIdentifier : String -> List Token -> Result String ( Expr, List Token )
 parseIdentifier name tokens =
+    case tokens of
+        TBang :: (TIdent cellName) :: rest ->
+            -- `Sheet!A1` or `Sheet!A1:B5`: a cross-sheet reference.
+            parseSheetRef name cellName rest
+
+        _ ->
+            parseLocalIdentifier name tokens
+
+
+parseLocalIdentifier : String -> List Token -> Result String ( Expr, List Token )
+parseLocalIdentifier name tokens =
     case String.toUpper name of
         "TRUE" ->
             Ok ( Lit (VBool True), tokens )
@@ -526,6 +541,27 @@ parseIdentifier name tokens =
                     -- An unknown bare name → resolved against the sheet's name table at
                     -- eval time (or #NAME? if undefined).
                     Ok ( NameE (String.toUpper name), tokens )
+
+
+{-| Parse the reference following `SheetName!`. -}
+parseSheetRef : String -> String -> List Token -> Result String ( Expr, List Token )
+parseSheetRef sheetName startName tokens =
+    case Ref.fromA1Abs startName of
+        Just ( startRef, startAbs ) ->
+            case tokens of
+                TColon :: (TIdent endName) :: rest ->
+                    case Ref.fromA1Abs endName of
+                        Just ( endRef, endAbs ) ->
+                            Ok ( SheetRangeE sheetName { start = startRef, end = endRef } startAbs endAbs, rest )
+
+                        Nothing ->
+                            Err ("bad cross-sheet range end: " ++ endName)
+
+                _ ->
+                    Ok ( SheetRefE sheetName startRef startAbs, tokens )
+
+        Nothing ->
+            Err ("bad cross-sheet reference: " ++ sheetName ++ "!" ++ startName)
 
 
 parseCall : String -> List Token -> Result String ( Expr, List Token )

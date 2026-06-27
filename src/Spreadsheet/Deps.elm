@@ -51,6 +51,13 @@ precedentsHelp resolveName expr acc =
         NameE name ->
             resolveName name ++ acc
 
+        SheetRefE _ _ _ ->
+            -- Cross-sheet refs are not local precedents; the workbook resolves them.
+            acc
+
+        SheetRangeE _ _ _ _ ->
+            acc
+
         Unary _ sub ->
             precedentsHelp resolveName sub acc
 
