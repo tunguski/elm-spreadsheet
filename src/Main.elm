@@ -649,10 +649,18 @@ formattingToolbar e =
     in
     div [ HA.class "fmt-toolbar" ]
         [ span [ HA.class "fmt-cell" ] [ text (Ref.toA1 e.selected) ]
-        , select [ HA.class "fsel", HA.value (Maybe.withDefault "" (Style.fontFamilyOf cur)), HE.onInput (FmtFont e.id) ]
-            (List.map (\( v, lbl ) -> option [ HA.value v ] [ text lbl ]) fontOptions)
-        , select [ HA.class "fsel fsel-sm", HA.value (String.fromInt (Maybe.withDefault 13 (Style.fontSizeOf cur))), HE.onInput (FmtSize e.id) ]
-            (List.map (\n -> option [ HA.value (String.fromInt n) ] [ text (String.fromInt n) ]) sizeOptions)
+        , let
+            curFont =
+                Maybe.withDefault "" (Style.fontFamilyOf cur)
+          in
+          select [ HA.class "fsel", HE.onInput (FmtFont e.id) ]
+            (List.map (\( v, lbl ) -> option [ HA.value v, HA.selected (v == curFont) ] [ text lbl ]) fontOptions)
+        , let
+            curSize =
+                Maybe.withDefault 13 (Style.fontSizeOf cur)
+          in
+          select [ HA.class "fsel fsel-sm", HE.onInput (FmtSize e.id) ]
+            (List.map (\n -> option [ HA.value (String.fromInt n), HA.selected (n == curSize) ] [ text (String.fromInt n) ]) sizeOptions)
         , fmtBtn (Style.isBold cur) (FmtBold e.id) "fmt-b" "B"
         , fmtBtn (Style.isItalic cur) (FmtItalic e.id) "fmt-i" "I"
         , fmtBtn (Style.isUnderline cur) (FmtUnderline e.id) "fmt-u" "U"
