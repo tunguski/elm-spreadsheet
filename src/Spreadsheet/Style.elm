@@ -9,6 +9,8 @@ module Spreadsheet.Style exposing
     , Condition(..)
     , matches
     , Rule
+    , RankKind(..)
+    , RankRule
     , ColorScale
     , DataBar
     , lerpColor
@@ -407,6 +409,27 @@ numTest value test =
 type alias Rule =
     { range : Range
     , condition : Condition
+    , style : CellStyle
+    }
+
+
+{-| A range-aware conditional kind: whether a cell qualifies depends on the *other* cells
+in the range, so (unlike `Condition`) the sheet evaluates it. `TopN`/`BottomN` take a
+count; duplicate/unique compare display text. -}
+type RankKind
+    = TopN Int
+    | BottomN Int
+    | AboveAverage
+    | BelowAverage
+    | Duplicate
+    | UniqueValue
+
+
+{-| A range-aware conditional-format rule: when a cell in `range` qualifies under `kind`,
+layer `style` on top. -}
+type alias RankRule =
+    { range : Range
+    , kind : RankKind
     , style : CellStyle
     }
 

@@ -28,6 +28,7 @@ import Spreadsheet.Find as Find
 import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format
 import Spreadsheet.Parser as Parser
+import Spreadsheet.Pivot as Pivot
 import Spreadsheet.Recalc as Recalc
 import Spreadsheet.Ref as Ref exposing (Range, Ref)
 import Spreadsheet.Refactor as Refactor
@@ -78,6 +79,8 @@ suite =
         , validationTests
         , findTests
         , workbookTests
+        , pivotTests
+        , condFmtTests
         ]
 
 
@@ -1616,3 +1619,109 @@ workbookTests =
                 in
                 Expect.equal ( [ "Two" ], "Two" ) ( Workbook.sheetNames wb, Workbook.activeName wb )
         ]
+
+
+
+-- PIVOT TABLES ---------------------------------------------------------------
+
+
+pivotTests : Test
+pivotTests =
+    describe "pivot tables"
+        [ test "sum by group" <|
+            \_ ->
+                Expect.equal (List.map (\( k, v ) -> ( k, normVal v )) [ ( "North", VNumber 150 ), ( "South", VNumber 230 ) ])
+                    (List.map (\( k, v ) -> ( k, normVal v )) (Pivot.pivot { keyCol = 0, valueCol = 1, agg = Pivot.Sum } (rng "A1:B4") pivotSheet))
+        , test "count by group" <|
+            \_ ->
+                Expect.equal (List.map (\( k, v ) -> ( k, normVal v )) [ ( "North", VNumber 2 ), ( "South", VNumber 2 ) ])
+                    (List.map (\( k, v ) -> ( k, normVal v )) (Pivot.pivot { keyCol = 0, valueCol = 1, agg = Pivot.Count } (rng "A1:B4") pivotSheet))
+        , test "average by group" <|
+            \_ ->
+                Expect.equal (List.map (\( k, v ) -> ( k, normVal v )) [ ( "North", VNumber 75 ), ( "South", VNumber 115 ) ])
+                    (List.map (\( k, v ) -> ( k, normVal v )) (Pivot.pivot { keyCol = 0, valueCol = 1, agg = Pivot.Average } (rng "A1:B4") pivotSheet))
+        , test "max by group" <|
+            \_ ->
+                Expect.equal (List.map (\( k, v ) -> ( k, normVal v )) [ ( "North", VNumber 100 ), ( "South", VNumber 200 ) ])
+                    (List.map (\( k, v ) -> ( k, normVal v )) (Pivot.pivot { keyCol = 0, valueCol = 1, agg = Pivot.Max } (rng "A1:B4") pivotSheet))
+        ]
+
+
+pivotSheet : Sheet
+pivotSheet =
+    sheetWith [ ( "A1", "North" ), ( "B1", "100" ), ( "A2", "South" ), ( "B2", "200" ), ( "A3", "North" ), ( "B3", "50" ), ( "A4", "South" ), ( "B4", "30" ) ]
+
+
+
+-- EXTENDED CONDITIONAL FORMATTING --------------------------------------------
+
+
+condFmtTests : Test
+condFmtTests =
+    describe "range-aware conditional formatting"
+        [ test "top-N highlights the largest values" <|
+            \_ ->
+                let
+                    s =
+                        rankSheet [ "10", "20", "30", "40", "50" ] (Style.TopN 2)
+                in
+                Expect.equal [ False, False, False, True, True ]
+                    (List.map (\a -> hasHot a s) [ "A1", "A2", "A3", "A4", "A5" ])
+        , test "bottom-N highlights the smallest values" <|
+            \_ ->
+                let
+                    s =
+                        rankSheet [ "10", "20", "30", "40", "50" ] (Style.BottomN 2)
+                in
+                Expect.equal [ True, True, False, False, False ]
+                    (List.map (\a -> hasHot a s) [ "A1", "A2", "A3", "A4", "A5" ])
+        , test "above-average highlights cells over the mean" <|
+            \_ ->
+                let
+                    s =
+                        rankSheet [ "10", "20", "30" ] Style.AboveAverage
+                in
+                Expect.equal [ False, False, True ] (List.map (\a -> hasHot a s) [ "A1", "A2", "A3" ])
+        , test "duplicate highlights repeated values" <|
+            \_ ->
+                let
+                    s =
+                        rankSheet [ "x", "y", "x" ] Style.Duplicate
+                in
+                Expect.equal [ True, False, True ] (List.map (\a -> hasHot a s) [ "A1", "A2", "A3" ])
+        , test "unique highlights one-off values" <|
+            \_ ->
+                let
+                    s =
+                        rankSheet [ "x", "y", "x" ] Style.UniqueValue
+                in
+                Expect.equal [ False, True, False ] (List.map (\a -> hasHot a s) [ "A1", "A2", "A3" ])
+        ]
+
+
+{-| A single-column sheet (A1..) with a rank rule over the whole column. -}
+rankSheet : List String -> Style.RankKind -> Sheet
+rankSheet values kind =
+    let
+        cells =
+            List.indexedMap (\i v -> ( "A" ++ String.fromInt (i + 1), v )) values
+
+        last =
+            "A" ++ String.fromInt (List.length values)
+    in
+    sheetWith cells
+        |> Sheet.addRankRule { range = rng ("A1:" ++ last), kind = kind, style = hotStyle }
+
+
+hotStyle : Style.CellStyle
+hotStyle =
+    let
+        base =
+            Style.emptyStyle
+    in
+    { base | classes = [ "hot" ] }
+
+
+hasHot : String -> Sheet -> Bool
+hasHot a1 s =
+    List.member "hot" (Sheet.renderedStyle (at a1) s).classes

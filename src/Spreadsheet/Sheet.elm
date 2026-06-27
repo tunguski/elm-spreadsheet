@@ -13,6 +13,7 @@ module Spreadsheet.Sheet exposing
     , setFormat
     , setStyle
     , addConditional
+    , addRankRule
     , addColorScale
     , addDataBar
     , recalcAll
@@ -135,6 +136,7 @@ type alias Model =
     , rows : Int
     , cols : Int
     , conditionals : List Rule
+    , rankRules : List Style.RankRule
     , colorScales : List ColorScale
     , dataBars : List DataBar
     , colWidths : Dict Int Int
@@ -158,6 +160,7 @@ empty rows cols =
         , rows = rows
         , cols = cols
         , conditionals = []
+        , rankRules = []
         , colorScales = []
         , dataBars = []
         , colWidths = Dict.empty
@@ -330,6 +333,13 @@ emptyCell =
 addConditional : Rule -> Sheet -> Sheet
 addConditional rule (Sheet m) =
     Sheet { m | conditionals = m.conditionals ++ [ rule ] }
+
+
+{-| Append a range-aware conditional rule (top/bottom-N, above/below average, duplicate/
+unique). -}
+addRankRule : Style.RankRule -> Sheet -> Sheet
+addRankRule rule (Sheet m) =
+    Sheet { m | rankRules = m.rankRules ++ [ rule ] }
 
 
 {-| Append a colour-scale rule. -}
@@ -758,6 +768,7 @@ adjustRanges f m =
         | conditionals = List.filterMap (\rule -> Maybe.map (\rng -> { rule | range = rng }) (f rule.range)) m.conditionals
         , colorScales = List.filterMap (\cs -> Maybe.map (\rng -> { cs | range = rng }) (f cs.range)) m.colorScales
         , dataBars = List.filterMap (\db -> Maybe.map (\rng -> { db | range = rng }) (f db.range)) m.dataBars
+        , rankRules = List.filterMap (\rr -> Maybe.map (\rng -> { rr | range = rng }) (f rr.range)) m.rankRules
         , merges = List.filterMap f m.merges
         , validations = List.filterMap (\vd -> Maybe.map (\rng -> { vd | range = rng }) (f vd.range)) m.validations
         , names =
@@ -1252,7 +1263,8 @@ baseStyleAt ref sheet =
 
 
 {-| The effective style for a cell: its static style with every matching conditional-format
-rule layered on top (in declaration order). -}
+rule layered on top (value-based rules first, then range-aware rank rules), in declaration
+order. -}
 effectiveStyle : Ref -> Sheet -> CellStyle
 effectiveStyle ref ((Sheet m) as sheet) =
     let
@@ -1265,10 +1277,114 @@ effectiveStyle ref ((Sheet m) as sheet) =
                     Ref.contains rule.range ref && Style.matches rule.condition value
                 )
                 m.conditionals
+
+        ranked =
+            List.filter (\rr -> rankApplies ref rr sheet) m.rankRules
     in
     List.foldl (\rule acc -> Style.mergeStyle acc rule.style)
-        (baseStyleAt ref sheet)
-        applicable
+        (List.foldl (\rule acc -> Style.mergeStyle acc rule.style) (baseStyleAt ref sheet) applicable)
+        ranked
+
+
+{-| Does a cell qualify under a range-aware rank rule? Examines the whole range's values. -}
+rankApplies : Ref -> Style.RankRule -> Sheet -> Bool
+rankApplies ref rule sheet =
+    if not (Ref.contains rule.range ref) then
+        False
+
+    else
+        let
+            vals =
+                List.map (\r -> valueAt r sheet) (Ref.cellsOf rule.range)
+
+            nums =
+                List.filterMap numberOfValue vals
+
+            thisVal =
+                valueAt ref sheet
+
+            thisText =
+                Value.toText thisVal
+        in
+        case rule.kind of
+            Style.TopN k ->
+                withNumber thisVal (\x -> not (List.isEmpty nums) && x >= nthLargest k nums)
+
+            Style.BottomN k ->
+                withNumber thisVal (\x -> not (List.isEmpty nums) && x <= nthSmallest k nums)
+
+            Style.AboveAverage ->
+                withNumber thisVal (\x -> meanGreater x nums)
+
+            Style.BelowAverage ->
+                withNumber thisVal (\x -> meanLess x nums)
+
+            Style.Duplicate ->
+                thisText /= "" && countOccurrences thisText vals >= 2
+
+            Style.UniqueValue ->
+                thisText /= "" && countOccurrences thisText vals == 1
+
+
+numberOfValue : Value -> Maybe Float
+numberOfValue v =
+    case v of
+        VNumber x ->
+            Just x
+
+        _ ->
+            Nothing
+
+
+withNumber : Value -> (Float -> Bool) -> Bool
+withNumber v f =
+    case v of
+        VNumber x ->
+            f x
+
+        _ ->
+            False
+
+
+nthLargest : Int -> List Float -> Float
+nthLargest k nums =
+    let
+        descending =
+            List.reverse (List.sort nums)
+    in
+    Maybe.withDefault (Maybe.withDefault 0 (List.minimum nums))
+        (List.head (List.drop (min (k - 1) (List.length nums - 1)) descending))
+
+
+nthSmallest : Int -> List Float -> Float
+nthSmallest k nums =
+    Maybe.withDefault (Maybe.withDefault 0 (List.maximum nums))
+        (List.head (List.drop (min (k - 1) (List.length nums - 1)) (List.sort nums)))
+
+
+meanGreater : Float -> List Float -> Bool
+meanGreater x nums =
+    case nums of
+        [] ->
+            False
+
+        _ ->
+            x > List.sum nums / toFloat (List.length nums)
+
+
+meanLess : Float -> List Float -> Bool
+meanLess x nums =
+    case nums of
+        [] ->
+            False
+
+        _ ->
+            x < List.sum nums / toFloat (List.length nums)
+
+
+countOccurrences : String -> List Value -> Int
+countOccurrences text vals =
+    List.length (List.filter (\v -> Value.toText v == text) vals)
 
 
 {-| The fully-resolved style for a cell as render-ready classes + inline declarations:
