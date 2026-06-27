@@ -122,8 +122,7 @@ body {
 }
 
 .ex-grid {
-    overflow: auto;
-    max-height: 540px;
+    overflow: hidden;
     border: 1px solid var(--ss-border);
     border-radius: 8px;
 }
@@ -461,14 +460,29 @@ body {
     opacity: 0.5;
 }
 
-/* The focusable grid container: hide the native outline; selection shows focus. */
+/* The focusable, scrolling grid container: hide the native outline (selection shows
+   focus) and own the scroll viewport (row virtualisation depends on this scrolling). */
 .ss-grid-focus {
     outline: none;
+    max-height: 540px;
+    overflow: auto;
 }
 
 .ss-grid-focus:focus,
 .ss-grid-focus:focus-visible {
     outline: none;
+}
+
+/* Rows are a fixed height so the host can map a scroll offset to a first-visible row;
+   this MUST match Spreadsheet.View.rowHeight (28px). */
+.ss-row,
+.ss-header-row {
+    height: 28px;
+}
+
+.ss-spacer td {
+    padding: 0;
+    border: 0;
 }
 
 .ss-row-header {

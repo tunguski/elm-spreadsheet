@@ -1,6 +1,7 @@
 module Spreadsheet.View exposing
     ( Config
     , KeyEvent
+    , rowHeight
     , view
     )
 
@@ -49,6 +50,8 @@ type alias Config msg =
     { id : String
     , viewCols : Int
     , viewRows : Int
+    , totalRows : Int
+    , firstRow : Int
     , selected : Maybe Ref
     , editing : Maybe ( Ref, String )
     , colWidth : Int -> Int
@@ -58,15 +61,45 @@ type alias Config msg =
     , onNavKey : KeyEvent -> msg
     , onEditKey : KeyEvent -> msg
     , onResizeStart : Int -> Float -> msg
+    , onScroll : Int -> msg
     }
+
+
+{-| The rendered pixel height of one grid row (must match the stylesheet). The host uses
+it to convert a scroll offset to a first-visible row, and the view uses it to size the
+spacer rows that stand in for the off-screen rows. -}
+rowHeight : Int
+rowHeight =
+    28
 
 
 {-| Render the grid. -}
 view : Config msg -> Sheet -> Html msg
 view config sheet =
+    let
+        -- Virtualise rows: only the window [firstRow, last] is in the DOM; spacer rows
+        -- stand in for the rest so the scrollbar reflects the full sheet height and the
+        -- visible block sits at the right scroll offset. Keeps a huge sheet cheap to draw.
+        firstRow =
+            clamp 0 (max 0 (config.totalRows - 1)) config.firstRow
+
+        last =
+            min (firstRow + config.viewRows - 1) (config.totalRows - 1)
+
+        topSpacer =
+            spacerRow config (firstRow * rowHeight)
+
+        bottomSpacer =
+            spacerRow config ((config.totalRows - 1 - last) * rowHeight)
+
+        bodyRows =
+            topSpacer
+                ++ List.map (dataRow config sheet) (List.range firstRow last)
+                ++ bottomSpacer
+    in
     div
         (List.append
-            [ HA.id config.id, HA.tabindex 0, HA.class "ss-grid-focus" ]
+            [ HA.id config.id, HA.tabindex 0, HA.class "ss-grid-focus", scrollHandler config ]
             (if config.editing == Nothing then
                 [ navHandler config ]
 
@@ -77,7 +110,26 @@ view config sheet =
         [ table [ HA.class "ss-table" ]
             [ colGroup config
             , thead [] [ headerRow config ]
-            , tbody [] (List.map (dataRow config sheet) (List.range 0 (config.viewRows - 1)))
+            , tbody [] bodyRows
+            ]
+        ]
+
+
+{-| A zero-content row that occupies `height` px, standing in for off-screen rows. -}
+spacerRow : Config msg -> Int -> List (Html msg)
+spacerRow config height =
+    if height <= 0 then
+        []
+
+    else
+        [ tr [ HA.class "ss-spacer" ]
+            [ td
+                [ HA.colspan (config.viewCols + 1)
+                , HA.style "height" (px height)
+                , HA.style "padding" "0"
+                , HA.style "border" "0"
+                ]
+                []
             ]
         ]
 
@@ -242,6 +294,15 @@ resizeHandler config col =
     HE.preventDefaultOn "mousedown"
         (Json.Decode.field "clientX" Json.Decode.float
             |> Json.Decode.andThen (\x -> Json.Decode.succeed ( config.onResizeStart col x, True ))
+        )
+
+
+{-| Report the container's scroll offset (px) so the host can pick the first visible row. -}
+scrollHandler : Config msg -> Html.Attribute msg
+scrollHandler config =
+    HE.on "scroll"
+        (Json.Decode.at [ "target", "scrollTop" ] Json.Decode.float
+            |> Json.Decode.andThen (\y -> Json.Decode.succeed (config.onScroll (round y)))
         )
 
 

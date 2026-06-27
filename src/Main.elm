@@ -70,6 +70,8 @@ type alias Example =
     , editing : Maybe ( Ref, String )
     , cols : Int
     , rows : Int
+    , totalRows : Int
+    , firstRow : Int
     , async : Bool
     , recalc : Recalc.State
     , status : String
@@ -110,6 +112,7 @@ type Msg
     | ResizeStart Int Int Float
     | ResizeMove Float
     | ResizeEnd
+    | ScrollGrid Int Int
     | NoOp
     | LoadBig Int
     | Frame Float
@@ -155,6 +158,13 @@ update msg model =
 
         ResizeEnd ->
             ( { model | drag = Nothing }, Cmd.none )
+
+        ScrollGrid id scrollTop ->
+            ( mapExample id
+                (\e -> { e | firstRow = clamp 0 (max 0 (e.totalRows - e.rows)) (scrollTop // View.rowHeight) })
+                model
+            , Cmd.none
+            )
 
         NoOp ->
             ( model, Cmd.none )
@@ -331,7 +341,7 @@ moveSelected dc dr e =
     { e
         | selected =
             { col = clamp 0 (e.cols - 1) (e.selected.col + dc)
-            , row = clamp 0 (e.rows - 1) (e.selected.row + dr)
+            , row = clamp 0 (e.totalRows - 1) (e.selected.row + dr)
             }
     }
 
@@ -492,6 +502,8 @@ example id title blurb cols rows sheet =
     , editing = Nothing
     , cols = cols
     , rows = rows
+    , totalRows = rows
+    , firstRow = 0
     , async = False
     , recalc = Recalc.idle
     , status = ""
@@ -703,16 +715,18 @@ exAsync : Example
 exAsync =
     { id = 8
     , title = "Big sheets without freezing (async)"
-    , blurb = "Click “Load” to fill ~2,400 chained formulas (a running sum and two derived columns down 800 rows). Instead of one blocking pass, the engine recalculates in small batches across animation frames and does the on-screen rows first, so the page stays responsive and the visible region settles immediately."
+    , blurb = "Click “Load” to fill ~2,400 chained formulas (a running sum and two derived columns down 800 rows) — then scroll through them. The grid is a viewport: only the ~20 rows on screen are ever in the DOM (the rest are spacer-backed), and the engine recalculates in small batches across animation frames, doing the visible rows first. So an 800-row sheet stays responsive and the on-screen region settles immediately."
     , sheet =
         build 820 8
             [ ( "A1", "Row" ), ( "B1", "×3" ), ( "C1", "Running Σ" ), ( "D1", "B+C" )
-            , ( "A2", "Press “Load” above to populate this sheet." )
+            , ( "A2", "Press “Load” above to populate this sheet, then scroll." )
             ]
     , selected = { col = 0, row = 0 }
     , editing = Nothing
     , cols = 8
-    , rows = 20
+    , rows = 22
+    , totalRows = 800
+    , firstRow = 0
     , async = True
     , recalc = Recalc.idle
     , status = "Idle — nothing loaded yet."
@@ -947,6 +961,8 @@ gridConfig e =
     { id = gridDomId e.id
     , viewCols = e.cols
     , viewRows = e.rows
+    , totalRows = e.totalRows
+    , firstRow = e.firstRow
     , selected = Just e.selected
     , editing = e.editing
     , colWidth = \c -> Sheet.colWidth c e.sheet
@@ -956,6 +972,7 @@ gridConfig e =
     , onNavKey = NavKey e.id
     , onEditKey = EditKey e.id
     , onResizeStart = ResizeStart e.id
+    , onScroll = ScrollGrid e.id
     }
 
 
