@@ -58,6 +58,8 @@ type alias Config msg =
     , editing : Maybe ( Ref, String )
     , highlights : List Ref
     , frozenCols : Int
+    , frozenRows : Int
+    , hiddenRows : List Int
     , colWidth : Int -> Int
     , onCellDown : Ref -> Bool -> msg
     , onCellEnter : Ref -> msg
@@ -98,9 +100,12 @@ view config sheet =
         bottomSpacer =
             spacerRow config ((config.totalRows - 1 - last) * rowHeight)
 
+        visibleRows =
+            List.filter (\r -> not (List.member r config.hiddenRows)) (List.range firstRow last)
+
         bodyRows =
             topSpacer
-                ++ List.map (dataRow config sheet) (List.range firstRow last)
+                ++ List.map (dataRow config sheet) visibleRows
                 ++ bottomSpacer
     in
     div
@@ -188,7 +193,15 @@ columnHeader config col =
 
 dataRow : Config msg -> Sheet -> Int -> Html msg
 dataRow config sheet row =
-    tr [ HA.class "ss-row" ]
+    let
+        rowAttrs =
+            if row < config.frozenRows then
+                [ HA.class "ss-row ss-frozen-row", HA.style "top" (px (rowHeight * (row + 1))) ]
+
+            else
+                [ HA.class "ss-row" ]
+    in
+    tr rowAttrs
         (th [ HA.class "ss-row-header" ] [ text (String.fromInt (row + 1)) ]
             :: List.filterMap
                 (\col ->
@@ -353,6 +366,13 @@ displayCell config sheet ref =
                     else
                         []
                    )
+        content =
+            case Sheet.sparklineAt ref sheet of
+                Just spark ->
+                    sparkline spark
+
+                Nothing ->
+                    div [ HA.class "ss-cell-content" ] [ text (Sheet.displayString ref sheet) ]
     in
     td
         (classAttr
@@ -360,7 +380,53 @@ displayCell config sheet ref =
             :: HE.onDoubleClick (config.onStartEdit ref)
             :: (spanAttrs ++ noteAttrs ++ dragAttrs ++ inlineAttrs)
         )
-        (div [ HA.class "ss-cell-content" ] [ text (Sheet.displayString ref sheet) ] :: indicators)
+        (content :: indicators)
+
+
+{-| A tiny in-cell chart (bars or a dot-line) of a numeric series, drawn with plain divs
+(no SVG) so it renders on every backend. -}
+sparkline : Sheet.Spark -> Html msg
+sparkline spark =
+    let
+        lo =
+            Maybe.withDefault 0 (List.minimum spark.values)
+
+        hi =
+            Maybe.withDefault 1 (List.maximum spark.values)
+
+        norm v =
+            if hi <= lo then
+                0.5
+
+            else
+                (v - lo) / (hi - lo)
+
+        item v =
+            case spark.kind of
+                Sheet.SparkBar ->
+                    div
+                        [ HA.class "ss-spark-bar"
+                        , HA.style "height" (pct (10 + norm v * 90))
+                        , HA.style "background" spark.color
+                        ]
+                        []
+
+                Sheet.SparkLine ->
+                    div [ HA.class "ss-spark-col" ]
+                        [ div
+                            [ HA.class "ss-spark-dot"
+                            , HA.style "margin-top" (pct ((1 - norm v) * 90))
+                            , HA.style "background" spark.color
+                            ]
+                            []
+                        ]
+    in
+    div [ HA.class "ss-spark" ] (List.map item spark.values)
+
+
+pct : Float -> String
+pct n =
+    String.fromInt (round n) ++ "%"
 
 
 {-| Sticky-left offset for a frozen column: the row-header width plus the widths of the

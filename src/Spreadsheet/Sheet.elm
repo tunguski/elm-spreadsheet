@@ -66,6 +66,10 @@ module Spreadsheet.Sheet exposing
     , validate
     , isInvalid
     , dropdownAt
+    , SparkKind(..)
+    , Spark
+    , setSparkline
+    , sparklineAt
     )
 
 {-| The spreadsheet model and its (synchronous) recalculation engine.
@@ -146,12 +150,28 @@ type alias Model =
     , notes : Dict ( Int, Int ) String
     , merges : List Range
     , validations : List Valid
+    , sparklines : Dict ( Int, Int ) SparkSpec
     }
 
 
 {-| A validation rule scoped to a range. -}
 type alias Valid =
     { range : Range, rule : Validation.Rule }
+
+
+{-| A sparkline attached to a cell: a tiny chart of a range, drawn in the cell. -}
+type SparkKind
+    = SparkBar
+    | SparkLine
+
+
+type alias SparkSpec =
+    { range : Range, kind : SparkKind, color : String }
+
+
+{-| A sparkline ready to render: the chart kind, colour and the numeric series. -}
+type alias Spark =
+    { kind : SparkKind, color : String, values : List Float }
 
 
 {-| An empty sheet of the given dimensions. -}
@@ -170,6 +190,7 @@ empty rows cols =
         , notes = Dict.empty
         , merges = []
         , validations = []
+        , sparklines = Dict.empty
         }
 
 
@@ -1156,6 +1177,31 @@ setNote ref note (Sheet m) =
 noteAt : Ref -> Sheet -> Maybe String
 noteAt ref (Sheet m) =
     Dict.get (key ref) m.notes
+
+
+
+-- SPARKLINES -----------------------------------------------------------------
+
+
+{-| Attach a sparkline (mini chart of `range`) to a cell. -}
+setSparkline : Ref -> Range -> SparkKind -> String -> Sheet -> Sheet
+setSparkline ref range kind color (Sheet m) =
+    Sheet { m | sparklines = Dict.insert (key ref) { range = range, kind = kind, color = color } m.sparklines }
+
+
+{-| The sparkline at a cell, resolved to its current numeric series. -}
+sparklineAt : Ref -> Sheet -> Maybe Spark
+sparklineAt ref ((Sheet m) as sheet) =
+    Dict.get (key ref) m.sparklines
+        |> Maybe.map
+            (\spec ->
+                { kind = spec.kind
+                , color = spec.color
+                , values =
+                    List.filterMap numberOfValue
+                        (List.map (\r -> valueAt r sheet) (Ref.cellsOf spec.range))
+                }
+            )
 
 
 

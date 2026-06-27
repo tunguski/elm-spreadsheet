@@ -24,12 +24,16 @@ import Json.Decode
 import Spreadsheet.Export as Export
 import Spreadsheet.Find as Find
 import Spreadsheet.Format as Format exposing (Format)
+import Spreadsheet.Pivot as Pivot
 import Spreadsheet.Recalc as Recalc
 import Spreadsheet.Ref as Ref exposing (Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
+import Spreadsheet.Spill as Spill
 import Spreadsheet.Style as Style
 import Spreadsheet.Validation as Validation
+import Spreadsheet.Value exposing (Value(..))
 import Spreadsheet.View as View
+import Spreadsheet.Workbook as Workbook exposing (Workbook)
 import Task
 
 
@@ -87,6 +91,11 @@ type alias Example =
     , editTools : Bool
     , workbench : Bool
     , frozenCols : Int
+    , frozenRows : Int
+    , hiddenRows : List Int
+    , workbook : Maybe Workbook
+    , filterCol : Int
+    , filterValue : String
     , findText : String
     , replaceText : String
     , exportPanel : String
@@ -108,6 +117,8 @@ init _ =
             , exFormatting
             , exEdit
             , exWorkbook
+            , exSheets
+            , exAnalytics
             , exAsync
             ]
       , drag = Nothing
@@ -165,6 +176,12 @@ type Msg
     | ReplaceAllMsg Int
     | ExportAs Int String
     | CloseExport Int
+      -- analytics / multi-sheet
+    | SwitchSheet Int String
+    | SetFilterCol Int String
+    | SetFilterValue Int String
+    | ClearFilter Int
+    | SpillUnique Int
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -330,6 +347,21 @@ update msg model =
 
         CloseExport id ->
             ( mapExample id (\e -> { e | exportPanel = "" }) model, Cmd.none )
+
+        SwitchSheet id name ->
+            ( mapExample id (switchSheet name) model, focusGrid id )
+
+        SetFilterCol id raw ->
+            ( mapExample id (\e -> applyFilter { e | filterCol = Maybe.withDefault e.filterCol (String.toInt raw), filterValue = "" }) model, Cmd.none )
+
+        SetFilterValue id v ->
+            ( mapExample id (\e -> applyFilter { e | filterValue = v }) model, Cmd.none )
+
+        ClearFilter id ->
+            ( mapExample id (\e -> { e | filterValue = "", hiddenRows = [] }) model, Cmd.none )
+
+        SpillUnique id ->
+            ( mapExample id spillUnique model, Cmd.none )
 
         Frame _ ->
             ( { model | examples = List.map stepExample model.examples }, Cmd.none )
@@ -809,15 +841,90 @@ applyDrag x model =
 
 recalcExample : List Ref -> Example -> Example
 recalcExample changed e =
-    if e.async then
-        let
-            ( started, state ) =
-                Recalc.begin (viewportOf e) changed e.sheet
-        in
-        { e | sheet = started, recalc = state, status = "Recalculating (async, visible-first)…" }
+    case e.workbook of
+        Just wb0 ->
+            -- A multi-sheet example: fold the edited active sheet back into the workbook
+            -- and recompute it to a fixed point so cross-sheet references settle.
+            let
+                wb =
+                    Workbook.recalc (Workbook.put (Workbook.activeName wb0) e.sheet wb0)
+            in
+            { e | workbook = Just wb, sheet = Maybe.withDefault e.sheet (Workbook.active wb) }
+
+        Nothing ->
+            if e.async then
+                let
+                    ( started, state ) =
+                        Recalc.begin (viewportOf e) changed e.sheet
+                in
+                { e | sheet = started, recalc = state, status = "Recalculating (async, visible-first)…" }
+
+            else
+                { e | sheet = Sheet.recalcFrom changed e.sheet }
+
+
+{-| Switch the active sheet of a multi-sheet example. -}
+switchSheet : String -> Example -> Example
+switchSheet name e =
+    case e.workbook of
+        Just wb ->
+            let
+                wb2 =
+                    Workbook.setActive name wb
+            in
+            { e
+                | workbook = Just wb2
+                , sheet = Maybe.withDefault e.sheet (Workbook.active wb2)
+                , selected = ref "A1"
+                , anchor = ref "A1"
+                , editing = Nothing
+            }
+
+        Nothing ->
+            e
+
+
+{-| Recompute hidden rows from the filter column/value (auto-filter). -}
+applyFilter : Example -> Example
+applyFilter e =
+    if e.filterValue == "" then
+        { e | hiddenRows = [] }
 
     else
-        { e | sheet = Sheet.recalcFrom changed e.sheet }
+        let
+            n =
+                Ref.normalize e.dataRange
+        in
+        { e
+            | hiddenRows =
+                List.filter
+                    (\r -> Sheet.displayString { col = e.filterCol, row = r } e.sheet /= e.filterValue)
+                    (List.range n.start.row n.end.row)
+        }
+
+
+{-| Spill the distinct values of the filter column to the right of the data. -}
+spillUnique : Example -> Example
+spillUnique e =
+    let
+        n =
+            Ref.normalize e.dataRange
+
+        srcRange =
+            { start = { col = e.filterCol, row = n.start.row }, end = { col = e.filterCol, row = n.end.row } }
+
+        matrix =
+            Spill.unique (Sheet.valuesOf srcRange e.sheet)
+
+        anchor =
+            { col = n.end.col + 2, row = n.start.row }
+    in
+    case Sheet.spillInto anchor matrix e.sheet of
+        Just s2 ->
+            recalcExample [ anchor ] { e | sheet = s2 }
+
+        Nothing ->
+            e
 
 
 stepExample : Example -> Example
@@ -923,6 +1030,11 @@ example id title blurb cols rows sheet =
     , editTools = False
     , workbench = False
     , frozenCols = 0
+    , frozenRows = 0
+    , hiddenRows = []
+    , workbook = Nothing
+    , filterCol = 0
+    , filterValue = ""
     , findText = ""
     , replaceText = ""
     , exportPanel = ""
@@ -1212,9 +1324,111 @@ wideColumns sheet =
 
 
 {-| 10 — async, visible-first recalculation of a large sheet. -}
+{-| 10 — multiple sheets with cross-sheet references and a tab strip. -}
+exSheets : Example
+exSheets =
+    let
+        wb =
+            Workbook.recalc
+                (Workbook.init
+                    [ ( "Budget", budgetSheet )
+                    , ( "Summary", summarySheet )
+                    ]
+                )
+
+        activeSheet =
+            Maybe.withDefault (Sheet.empty 12 6) (Workbook.active wb)
+
+        e =
+            example 10
+                "Multiple sheets & cross-sheet formulas"
+                "A workbook of two sheets. The Summary sheet pulls its numbers from the Budget sheet with cross-sheet references like =SUM(Budget!B2:B4) and =MAX(Budget!C2:C4). Click the tabs to switch sheets; edit a Budget number and switch back — the Summary has already recomputed (the workbook recalculates to a fixed point so cross-sheet chains settle)."
+                3
+                6
+                activeSheet
+    in
+    { e | workbook = Just wb, dataRange = rangeOf "A1" "C5" }
+
+
+budgetSheet : Sheet
+budgetSheet =
+    build 12 6
+        [ ( "A1", "Category" ), ( "B1", "Planned" ), ( "C1", "Actual" )
+        , ( "A2", "Travel" ), ( "B2", "5000" ), ( "C2", "4800" )
+        , ( "A3", "Software" ), ( "B3", "3000" ), ( "C3", "3200" )
+        , ( "A4", "Marketing" ), ( "B4", "8000" ), ( "C4", "7500" )
+        ]
+        |> withStyle (cells "A1" "C1") (\s -> { s | bold = True })
+
+
+summarySheet : Sheet
+summarySheet =
+    build 12 6
+        [ ( "A1", "Metric" ), ( "B1", "Value" )
+        , ( "A2", "Total planned" ), ( "B2", "=SUM(Budget!B2:B4)" )
+        , ( "A3", "Total actual" ), ( "B3", "=SUM(Budget!C2:C4)" )
+        , ( "A4", "Variance" ), ( "B4", "=B3-B2" )
+        , ( "A5", "Largest actual" ), ( "B5", "=MAX(Budget!C2:C4)" )
+        ]
+        |> withStyle (cells "A1" "B1") (\s -> { s | bold = True })
+
+
+{-| 11 — analytics: in-cell sparklines, a frozen header row, top-N highlighting, an
+auto-filter, a pivot summary and a UNIQUE spill. -}
+exAnalytics : Example
+exAnalytics =
+    let
+        e =
+            example 11
+                "Analytics: sparklines, filter, pivot & spill"
+                "A sales grid. The Trend column draws an in-cell sparkline of each rep's three quarters (plain divs, no SVG). The header row is frozen — scroll the grid and it stays. The top 3 totals are highlighted (a range-aware rule). Pick a Region in the filter to hide other rows; the pivot panel below sums totals by region; “Spill unique regions” writes the distinct regions to the right (a #SPILL!-checked dynamic array)."
+                8
+                7
+                analyticsSheet
+    in
+    { e
+        | frozenRows = 1
+        , filterCol = 4
+        , dataRange = rangeOf "A2" "F7"
+    }
+
+
+analyticsSheet : Sheet
+analyticsSheet =
+    build 14 8
+        [ ( "A1", "Rep" ), ( "B1", "Q1" ), ( "C1", "Q2" ), ( "D1", "Q3" ), ( "E1", "Region" ), ( "F1", "Total" ), ( "G1", "Trend" )
+        , ( "A2", "Ann" ), ( "B2", "30" ), ( "C2", "45" ), ( "D2", "60" ), ( "E2", "West" ), ( "F2", "=SUM(B2:D2)" )
+        , ( "A3", "Bob" ), ( "B3", "50" ), ( "C3", "40" ), ( "D3", "35" ), ( "E3", "East" ), ( "F3", "=SUM(B3:D3)" )
+        , ( "A4", "Cy" ), ( "B4", "20" ), ( "C4", "55" ), ( "D4", "70" ), ( "E4", "West" ), ( "F4", "=SUM(B4:D4)" )
+        , ( "A5", "Dee" ), ( "B5", "65" ), ( "C5", "60" ), ( "D5", "62" ), ( "E5", "East" ), ( "F5", "=SUM(B5:D5)" )
+        , ( "A6", "Eve" ), ( "B6", "25" ), ( "C6", "30" ), ( "D6", "20" ), ( "E6", "West" ), ( "F6", "=SUM(B6:D6)" )
+        , ( "A7", "Flo" ), ( "B7", "70" ), ( "C7", "75" ), ( "D7", "80" ), ( "E7", "East" ), ( "F7", "=SUM(B7:D7)" )
+        ]
+        |> withStyle (cells "A1" "G1") (\s -> { s | bold = True })
+        |> withSparklines
+        |> Sheet.addRankRule { range = rangeOf "F2" "F7", kind = Style.TopN 3, style = classStyle "ss-pos" }
+        |> Sheet.recalcAll
+
+
+{-| A bar sparkline in each Trend cell (G), charting that row's Q1:Q3. -}
+withSparklines : Sheet -> Sheet
+withSparklines sheet =
+    List.foldl
+        (\r acc ->
+            Sheet.setSparkline { col = 6, row = r }
+                { start = { col = 1, row = r }, end = { col = 3, row = r } }
+                Sheet.SparkBar
+                "#1a73e8"
+                acc
+        )
+        sheet
+        (List.range 1 6)
+
+
+{-| 12 — async, visible-first recalculation of a large sheet. -}
 exAsync : Example
 exAsync =
-    { id = 10
+    { id = 12
     , title = "Big sheets without freezing (async)"
     , blurb = "Click “Load” to fill ~2,400 chained formulas (a running sum and two derived columns down 800 rows) — then scroll through them. The grid is a viewport: only the ~20 rows on screen are ever in the DOM (the rest are spacer-backed), and the engine recalculates in small batches across animation frames, doing the visible rows first. So an 800-row sheet stays responsive and the on-screen region settles immediately."
     , sheet =
@@ -1239,6 +1453,11 @@ exAsync =
     , editTools = False
     , workbench = False
     , frozenCols = 0
+    , frozenRows = 0
+    , hiddenRows = []
+    , workbook = Nothing
+    , filterCol = 0
+    , filterValue = ""
     , findText = ""
     , replaceText = ""
     , exportPanel = ""
@@ -1333,13 +1552,147 @@ exampleView selecting e =
 
               else
                 []
+            , case e.workbook of
+                Just wb ->
+                    [ sheetTabs e wb ]
+
+                Nothing ->
+                    []
+            , if e.frozenRows > 0 then
+                [ analyticsToolbar e ]
+
+              else
+                []
             , [ asyncControls e ]
             , styleNode e.css
             , [ div [ HA.class (gridClass e) ] [ View.view (gridConfig (selecting == Just e.id) e) e.sheet ] ]
+            , if e.frozenRows > 0 then
+                [ pivotPanel e ]
+
+              else
+                []
             , exportPanelView e
             , cssPanel e.css
             ]
         )
+
+
+{-| The tab strip for a multi-sheet example. -}
+sheetTabs : Example -> Workbook -> Html Msg
+sheetTabs e wb =
+    div [ HA.class "ss-tabs" ]
+        (List.map
+            (\name ->
+                button
+                    [ HA.class
+                        (if name == Workbook.activeName wb then
+                            "ss-tab ss-tab-on"
+
+                         else
+                            "ss-tab"
+                        )
+                    , HE.onClick (SwitchSheet e.id name)
+                    ]
+                    [ text name ]
+            )
+            (Workbook.sheetNames wb)
+        )
+
+
+{-| The analytics toolbar: an auto-filter on a column plus a UNIQUE-spill button. -}
+analyticsToolbar : Example -> Html Msg
+analyticsToolbar e =
+    let
+        n =
+            Ref.normalize e.dataRange
+
+        colNames =
+            List.range n.start.col n.end.col
+
+        values =
+            distinctColumn e.filterCol e
+    in
+    div [ HA.class "fmt-toolbar" ]
+        [ span [ HA.class "wb-label" ] [ text "Filter" ]
+        , select [ HA.class "fsel", HE.onInput (SetFilterCol e.id) ]
+            (List.map (\c -> option [ HA.value (String.fromInt c), HA.selected (c == e.filterCol) ] [ text (columnTitle c e) ]) colNames)
+        , select [ HA.class "fsel", HE.onInput (SetFilterValue e.id) ]
+            (option [ HA.value "" ] [ text "(all)" ]
+                :: List.map (\v -> option [ HA.value v, HA.selected (v == e.filterValue) ] [ text v ]) values
+            )
+        , editBtn (e.filterValue /= "") (ClearFilter e.id) "Clear"
+        , span [ HA.class "fmt-sep" ] []
+        , editBtn True (SpillUnique e.id) "Spill unique regions"
+        ]
+
+
+{-| The header label of a column (its top-row text), for the filter dropdown. -}
+columnTitle : Int -> Example -> String
+columnTitle col e =
+    let
+        n =
+            Ref.normalize e.dataRange
+
+        header =
+            Sheet.displayString { col = col, row = n.start.row - 1 } e.sheet
+    in
+    if header == "" then
+        Ref.colToString col
+
+    else
+        header
+
+
+{-| Distinct display values down a column within the data range. -}
+distinctColumn : Int -> Example -> List String
+distinctColumn col e =
+    let
+        n =
+            Ref.normalize e.dataRange
+    in
+    List.foldl
+        (\r acc ->
+            let
+                v =
+                    Sheet.displayString { col = col, row = r } e.sheet
+            in
+            if v == "" || List.member v acc then
+                acc
+
+            else
+                acc ++ [ v ]
+        )
+        []
+        (List.range n.start.row n.end.row)
+
+
+{-| A small pivot summary: total of column F grouped by the filter column. -}
+pivotPanel : Example -> Html Msg
+pivotPanel e =
+    let
+        rows =
+            Pivot.pivot { keyCol = e.filterCol, valueCol = 5, agg = Pivot.Sum } e.dataRange e.sheet
+    in
+    div [ HA.class "css-panel" ]
+        [ div [ HA.class "css-cap" ] [ text ("Pivot — total by " ++ columnTitle e.filterCol e) ]
+        , Html.table [ HA.class "pivot" ]
+            (Html.tr []
+                [ Html.th [] [ text (columnTitle e.filterCol e) ], Html.th [] [ text "Sum" ] ]
+                :: List.map
+                    (\( k, v ) -> Html.tr [] [ Html.td [] [ text k ], Html.td [] [ text (valueText v) ] ])
+                    rows
+            )
+        ]
+
+
+valueText : Value -> String
+valueText v =
+    case v of
+        VNumber n ->
+            String.fromInt (round n)
+
+        _ ->
+            ""
 
 
 gridClass : Example -> String
@@ -1579,6 +1932,8 @@ gridConfig dragging e =
     , editing = e.editing
     , highlights = findHits e
     , frozenCols = e.frozenCols
+    , frozenRows = e.frozenRows
+    , hiddenRows = e.hiddenRows
     , colWidth = \c -> Sheet.colWidth c e.sheet
     , onCellDown = CellDown e.id
     , onCellEnter = CellEnter e.id
