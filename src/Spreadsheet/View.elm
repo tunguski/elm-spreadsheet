@@ -23,7 +23,7 @@ prioritises.
 import Html exposing (Html, div, input, table, tbody, td, text, th, thead, tr)
 import Html.Attributes as HA
 import Html.Events as HE
-import Json.Decode as Decode
+import Json.Decode
 import Spreadsheet.Ref as Ref exposing (Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 
@@ -136,18 +136,20 @@ displayCell config sheet ref =
     td
         (classAttr
             :: HE.onClick (config.onSelect ref)
-            :: onDoubleClick (config.onStartEdit ref)
+            :: HE.onDoubleClick (config.onStartEdit ref)
             :: inlineAttrs
         )
         [ div [ HA.class "ss-cell-content" ] [ text (Sheet.displayString ref sheet) ] ]
 
 
-onDoubleClick : msg -> Html.Attribute msg
-onDoubleClick msg =
-    HE.on "dblclick" (Decode.succeed msg)
+{-| Emit the pressed key's name (e.g. "Enter", "Escape") so the host can commit/cancel.
 
-
-{-| Emit the pressed key's name (e.g. "Enter", "Escape") so the host can commit/cancel. -}
+NB: the runtime binds `Json.Decode.*` under that fully-qualified name; an `as Decode`
+import alias would emit `Decode.andThen` and fail with `Unbound: Decode.andThen` at run
+time. So we qualify it in full. -}
 onKeyDown : (String -> msg) -> Html.Attribute msg
 onKeyDown toMsg =
-    HE.on "keydown" (Decode.map toMsg (Decode.field "key" Decode.string))
+    HE.on "keydown"
+        (Json.Decode.field "key" Json.Decode.string
+            |> Json.Decode.andThen (\k -> Json.Decode.succeed (toMsg k))
+        )

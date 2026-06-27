@@ -211,6 +211,132 @@ body {
     text-decoration: underline;
 }
 
+/* --- formatting toolbar (example 7) ------------------------------------- */
+
+.fmt-toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 14px;
+    padding: 8px 10px;
+    background: #f5f6f8;
+    border: 1px solid var(--ss-border);
+    border-radius: 8px;
+}
+
+.fmt-cell {
+    font-weight: 600;
+    color: #5f6368;
+    min-width: 32px;
+    text-align: center;
+    padding: 0 6px;
+}
+
+.fsel {
+    font: inherit;
+    font-size: 13px;
+    height: 30px;
+    padding: 0 6px;
+    border: 1px solid var(--ss-border);
+    border-radius: 6px;
+    background: #fff;
+}
+
+.fsel-sm {
+    width: 56px;
+}
+
+.fbtn {
+    font: inherit;
+    width: 30px;
+    height: 30px;
+    border: 1px solid var(--ss-border);
+    border-radius: 6px;
+    background: #fff;
+    color: #3c4043;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.fbtn:hover {
+    background: #eef1f6;
+}
+
+.fbtn-on {
+    background: var(--ss-accent);
+    border-color: var(--ss-accent);
+    color: #fff;
+}
+
+.fmt-b {
+    font-weight: 800;
+}
+
+.fmt-i {
+    font-style: italic;
+}
+
+.fmt-u {
+    text-decoration: underline;
+}
+
+.fmt-s {
+    text-decoration: line-through;
+}
+
+.fcolor {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    height: 30px;
+    padding: 0 6px;
+    border: 1px solid var(--ss-border);
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+}
+
+.fcolor-lbl {
+    font-weight: 700;
+    font-size: 13px;
+    color: #3c4043;
+}
+
+.fcolor input[type="color"] {
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: none;
+    padding: 0;
+    cursor: pointer;
+}
+
+/* --- presented stylesheet (example 6) ----------------------------------- */
+
+.css-panel {
+    margin-top: 14px;
+}
+
+.css-cap {
+    font-size: 12px;
+    color: #5f6368;
+    margin-bottom: 6px;
+}
+
+.code {
+    margin: 0;
+    padding: 14px 16px;
+    background: #0f1b2d;
+    color: #d6e2f0;
+    border-radius: 10px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    overflow-x: auto;
+    white-space: pre;
+}
+
 /* --- toolbar ------------------------------------------------------------- */
 
 .ss-toolbar {

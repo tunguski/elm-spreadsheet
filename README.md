@@ -23,10 +23,13 @@ engine is pure and effect-free, so it is fully unit-tested without a browser.
 - **Formatting.** `General`, `Number`, `Currency`, `Percent`, `Scientific`, `DateTime`
   and raw `Custom` Excel-style format codes (`#,##0.00`, `0.0%`, `yyyy-mm-dd`), shared
   with the `TEXT()` function.
-- **Conditional & value styling.** Static cell styles, conditional-format **rules**
+- **Conditional & value styling.** Static cell styles — bold/italic/underline/strike,
+  alignment, font family & size, text and fill colour — plus conditional-format **rules**
   (greater-than, between, text-contains, COUNTIF-style criteria, …), two-colour **scales**
   and **data bars**. Styling is expressed as **CSS classes** by default (so a host can
-  restyle everything); only continuous data-driven colour is emitted inline.
+  restyle everything — the demo includes a Solarized-beige theme); only data-driven values
+  (colour, font, size, bar widths) are emitted inline. A `with*/toggle*/…Of` API on
+  `Style` backs a Word-style formatting toolbar in the demo.
 - **Sync *and* async recalculation.** `recalcAll`/`recalcFrom` recompute synchronously in
   dependency order (with circular-reference detection → `#CIRC!`). For very large sheets,
   `Spreadsheet.Recalc` slices the same work into per-frame **batches** and computes the

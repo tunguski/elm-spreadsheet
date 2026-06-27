@@ -13,6 +13,25 @@ module Spreadsheet.Style exposing
     , DataBar
     , lerpColor
     , dataBarPercent
+    , toggleBold
+    , toggleItalic
+    , toggleUnderline
+    , toggleStrike
+    , withAlign
+    , withColor
+    , withBackground
+    , withFontFamily
+    , withFontSize
+    , clearFontFamily
+    , isBold
+    , isItalic
+    , isUnderline
+    , isStrike
+    , alignOf
+    , colorOf
+    , backgroundOf
+    , fontFamilyOf
+    , fontSizeOf
     )
 
 {-| Cell appearance: static styling, conditional-formatting rules, colour scales and
@@ -50,6 +69,8 @@ type alias CellStyle =
     , align : Maybe Align
     , color : Maybe String
     , background : Maybe String
+    , fontFamily : Maybe String
+    , fontSize : Maybe Int
     }
 
 
@@ -71,6 +92,8 @@ emptyStyle =
     , align = Nothing
     , color = Nothing
     , background = Nothing
+    , fontFamily = Nothing
+    , fontSize = Nothing
     }
 
 
@@ -87,6 +110,8 @@ mergeStyle base top =
     , align = orElse base.align top.align
     , color = orElse base.color top.color
     , background = orElse base.background top.background
+    , fontFamily = orElse base.fontFamily top.fontFamily
+    , fontSize = orElse base.fontSize top.fontSize
     }
 
 
@@ -133,6 +158,8 @@ render style value =
             List.filterMap identity
                 [ Maybe.map (\c -> ( "color", c )) style.color
                 , Maybe.map (\c -> ( "background-color", c )) style.background
+                , Maybe.map (\f -> ( "font-family", f )) style.fontFamily
+                , Maybe.map (\n -> ( "font-size", String.fromInt n ++ "px" )) style.fontSize
                 ]
     in
     { classes = alignmentClass :: utilityClasses ++ style.classes
@@ -177,6 +204,126 @@ defaultAlign value =
 
         _ ->
             "ss-align-left"
+
+
+
+-- MUTATORS & READERS (for a formatting toolbar) ------------------------------
+-- These keep `CellStyle`'s record shape private to this module, so callers (a
+-- toolbar in the host app) compose styles without touching its fields.
+
+
+{-| Flip the bold flag. -}
+toggleBold : CellStyle -> CellStyle
+toggleBold s =
+    { s | bold = not s.bold }
+
+
+{-| Flip the italic flag. -}
+toggleItalic : CellStyle -> CellStyle
+toggleItalic s =
+    { s | italic = not s.italic }
+
+
+{-| Flip the underline flag. -}
+toggleUnderline : CellStyle -> CellStyle
+toggleUnderline s =
+    { s | underline = not s.underline }
+
+
+{-| Flip the strikethrough flag. -}
+toggleStrike : CellStyle -> CellStyle
+toggleStrike s =
+    { s | strikethrough = not s.strikethrough }
+
+
+{-| Set horizontal alignment. -}
+withAlign : Align -> CellStyle -> CellStyle
+withAlign a s =
+    { s | align = Just a }
+
+
+{-| Set the text colour (any CSS colour). -}
+withColor : String -> CellStyle -> CellStyle
+withColor c s =
+    { s | color = Just c }
+
+
+{-| Set the fill (background) colour. -}
+withBackground : String -> CellStyle -> CellStyle
+withBackground c s =
+    { s | background = Just c }
+
+
+{-| Set the font family (a CSS font stack). -}
+withFontFamily : String -> CellStyle -> CellStyle
+withFontFamily f s =
+    { s | fontFamily = Just f }
+
+
+{-| Clear the font family back to the default. -}
+clearFontFamily : CellStyle -> CellStyle
+clearFontFamily s =
+    { s | fontFamily = Nothing }
+
+
+{-| Set the font size in pixels. -}
+withFontSize : Int -> CellStyle -> CellStyle
+withFontSize n s =
+    { s | fontSize = Just n }
+
+
+{-| Read the bold flag. -}
+isBold : CellStyle -> Bool
+isBold s =
+    s.bold
+
+
+{-| Read the italic flag. -}
+isItalic : CellStyle -> Bool
+isItalic s =
+    s.italic
+
+
+{-| Read the underline flag. -}
+isUnderline : CellStyle -> Bool
+isUnderline s =
+    s.underline
+
+
+{-| Read the strikethrough flag. -}
+isStrike : CellStyle -> Bool
+isStrike s =
+    s.strikethrough
+
+
+{-| Read the alignment, if set. -}
+alignOf : CellStyle -> Maybe Align
+alignOf s =
+    s.align
+
+
+{-| Read the text colour, if set. -}
+colorOf : CellStyle -> Maybe String
+colorOf s =
+    s.color
+
+
+{-| Read the fill colour, if set. -}
+backgroundOf : CellStyle -> Maybe String
+backgroundOf s =
+    s.background
+
+
+{-| Read the font family, if set. -}
+fontFamilyOf : CellStyle -> Maybe String
+fontFamilyOf s =
+    s.fontFamily
+
+
+{-| Read the font size, if set. -}
+fontSizeOf : CellStyle -> Maybe Int
+fontSizeOf s =
+    s.fontSize
 
 
 

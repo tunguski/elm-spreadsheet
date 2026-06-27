@@ -16,7 +16,7 @@ view and owns the recalculation lifecycle.
 
 import Browser
 import Browser.Events
-import Html exposing (Html, a, button, div, h1, h2, p, section, span, text)
+import Html exposing (Html, a, button, div, h1, h2, input, label, option, p, pre, section, select, span, text)
 import Html.Attributes as HA
 import Html.Events as HE
 import Spreadsheet.Format as Format exposing (Format)
@@ -58,6 +58,9 @@ type alias Example =
     , async : Bool
     , recalc : Recalc.State
     , status : String
+    , toolbar : Bool
+    , wrapClass : String
+    , css : Maybe String
     }
 
 
@@ -69,6 +72,8 @@ init _ =
             , exFunctions
             , exFormats
             , exConditional
+            , exStyling
+            , exFormatting
             , exAsync
             ]
       }
@@ -87,6 +92,16 @@ type Msg
     | EditKey Int String
     | LoadBig Int
     | Frame Float
+      -- formatting toolbar (acts on the example's selected cell)
+    | FmtBold Int
+    | FmtItalic Int
+    | FmtUnderline Int
+    | FmtStrike Int
+    | FmtAlign Int Style.Align
+    | FmtColor Int String
+    | FmtBackground Int String
+    | FmtFont Int String
+    | FmtSize Int String
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -115,6 +130,49 @@ update msg model =
         LoadBig id ->
             ( mapExample id loadBig model, Cmd.none )
 
+        FmtBold id ->
+            ( restyle id Style.toggleBold model, Cmd.none )
+
+        FmtItalic id ->
+            ( restyle id Style.toggleItalic model, Cmd.none )
+
+        FmtUnderline id ->
+            ( restyle id Style.toggleUnderline model, Cmd.none )
+
+        FmtStrike id ->
+            ( restyle id Style.toggleStrike model, Cmd.none )
+
+        FmtAlign id a ->
+            ( restyle id (Style.withAlign a) model, Cmd.none )
+
+        FmtColor id hex ->
+            ( restyle id (Style.withColor hex) model, Cmd.none )
+
+        FmtBackground id hex ->
+            ( restyle id (Style.withBackground hex) model, Cmd.none )
+
+        FmtFont id font ->
+            ( restyle id
+                (if font == "" then
+                    Style.clearFontFamily
+
+                 else
+                    Style.withFontFamily font
+                )
+                model
+            , Cmd.none
+            )
+
+        FmtSize id raw ->
+            ( case String.toInt raw of
+                Just n ->
+                    restyle id (Style.withFontSize n) model
+
+                Nothing ->
+                    model
+            , Cmd.none
+            )
+
         Frame _ ->
             ( { model | examples = List.map stepExample model.examples }, Cmd.none )
 
@@ -133,6 +191,17 @@ mapExample id f model =
                 )
                 model.examples
     }
+
+
+{-| Apply a style transform to an example's currently-selected cell. Styling never
+changes values, so no recalculation is needed. -}
+restyle : Int -> (Style.CellStyle -> Style.CellStyle) -> Model -> Model
+restyle id f model =
+    mapExample id
+        (\e ->
+            { e | sheet = Sheet.setStyle e.selected (f (Sheet.baseStyleAt e.selected e.sheet)) e.sheet }
+        )
+        model
 
 
 {-| Commit the in-progress edit and recalculate (sync, or async for the big example). -}
@@ -224,6 +293,9 @@ example id title blurb cols rows sheet =
     , async = False
     , recalc = Recalc.idle
     , status = ""
+    , toolbar = False
+    , wrapClass = ""
+    , css = Nothing
     }
 
 
@@ -347,10 +419,87 @@ conditionalSheet _ =
         |> Sheet.recalcAll
 
 
-{-| 6 — async, visible-first recalculation of a large sheet. -}
+{-| 6 — a custom CSS theme (Solarized beige), scoped to one grid, with its stylesheet shown. -}
+exStyling : Example
+exStyling =
+    let
+        e =
+            example 6
+                "Custom CSS theme"
+                "The grid is plain markup with semantic ss-* classes, so a host page can restyle it entirely with its own CSS — no Elm change. Here a Solarized-beige theme is scoped to one container. The exact stylesheet applied is shown below the sheet."
+                4
+                6
+                styledSheet
+    in
+    { e | wrapClass = "theme-solarized", css = Just solarizedCss }
+
+
+styledSheet : Sheet
+styledSheet =
+    build 10 6
+        [ ( "A1", "Roast" ), ( "B1", "Origin" ), ( "C1", "Cup" )
+        , ( "A2", "Espresso" ), ( "B2", "Brazil" ), ( "C2", "3.20" )
+        , ( "A3", "Pour-over" ), ( "B3", "Ethiopia" ), ( "C3", "4.50" )
+        , ( "A4", "Cold brew" ), ( "B4", "Colombia" ), ( "C4", "4.00" )
+        , ( "A5", "Average" ), ( "C5", "=AVERAGE(C2:C4)" )
+        ]
+        |> withFormat (cells "C2" "C5") (Format.Currency "$" 2)
+        |> withStyle (cells "A1" "C1") (\s -> Style.withColor "#b58900" { s | bold = True })
+        |> Sheet.recalcAll
+
+
+solarizedCss : String
+solarizedCss =
+    """/* Solarized-beige theme, scoped to one container — overrides the ss-* classes. */
+.theme-solarized .ss-table  { font-family: 'Iowan Old Style', Georgia, serif; }
+.theme-solarized .ss-cell   { background: #fdf6e3; color: #657b83; border-color: #e9e1c8; }
+.theme-solarized .ss-corner,
+.theme-solarized .ss-col-header,
+.theme-solarized .ss-row-header {
+    background: #eee8d5; color: #586e75; border-color: #ded7bf;
+}
+.theme-solarized .ss-cell.ss-selected {
+    outline-color: #268bd2; background: #f3ecd6;
+}
+.theme-solarized .ss-cell-input { background: #fdf6e3; color: #586e75; }"""
+
+
+{-| 7 — a live formatting toolbar (font, size, bold/italic/underline/strike, colours, align). -}
+exFormatting : Example
+exFormatting =
+    let
+        e =
+            example 7
+                "Rich text formatting (toolbar)"
+                "Click a cell, then use the toolbar to set the font, size, bold / italic / underline / strikethrough, text and fill colour, and alignment — the basics from Excel or Sheets. Structural styles become CSS classes; font, size and colours are data-driven inline. A few cells are pre-styled to start."
+                5
+                7
+                formattingSheet
+    in
+    { e | toolbar = True, selected = ref "A1" }
+
+
+formattingSheet : Sheet
+formattingSheet =
+    build 10 6
+        [ ( "A1", "Quarterly Report" )
+        , ( "A2", "Draft — confidential" )
+        , ( "A4", "Revenue" ), ( "B4", "125000" )
+        , ( "A5", "Growth" ), ( "B5", "0.18" )
+        , ( "A7", "Edit me, then format!" )
+        ]
+        |> withStyle [ ref "A1" ] (\s -> Style.withFontSize 20 (Style.withColor "#1a73e8" { s | bold = True }))
+        |> withStyle [ ref "A2" ] (\s -> Style.withColor "#cb4b16" { s | italic = True })
+        |> Sheet.setFormat (ref "B4") (Format.Currency "$" 0)
+        |> Sheet.setFormat (ref "B5") (Format.Percent 1)
+        |> withStyle [ ref "B4" ] (Style.withBackground "#fff3cd")
+        |> Sheet.recalcAll
+
+
+{-| 8 — async, visible-first recalculation of a large sheet. -}
 exAsync : Example
 exAsync =
-    { id = 6
+    { id = 8
     , title = "Big sheets without freezing (async)"
     , blurb = "Click “Load” to fill ~2,400 chained formulas (a running sum and two derived columns down 800 rows). Instead of one blocking pass, the engine recalculates in small batches across animation frames and does the on-screen rows first, so the page stays responsive and the visible region settles immediately."
     , sheet =
@@ -365,6 +514,9 @@ exAsync =
     , async = True
     , recalc = Recalc.idle
     , status = "Idle — nothing loaded yet."
+    , toolbar = False
+    , wrapClass = ""
+    , css = Nothing
     }
 
 
@@ -431,14 +583,128 @@ header =
 exampleView : Example -> Html Msg
 exampleView e =
     section [ HA.class "ex" ]
-        [ div [ HA.class "ex-head" ]
-            [ span [ HA.class "ex-num" ] [ text (String.fromInt e.id) ]
-            , h2 [ HA.class "ex-title" ] [ text e.title ]
+        (List.concat
+            [ [ div [ HA.class "ex-head" ]
+                    [ span [ HA.class "ex-num" ] [ text (String.fromInt e.id) ]
+                    , h2 [ HA.class "ex-title" ] [ text e.title ]
+                    ]
+              , p [ HA.class "ex-blurb" ] [ text e.blurb ]
+              ]
+            , if e.toolbar then
+                [ formattingToolbar e ]
+
+              else
+                []
+            , [ asyncControls e ]
+            , styleNode e.css
+            , [ div [ HA.class (gridClass e) ] [ View.view (gridConfig e) e.sheet ] ]
+            , cssPanel e.css
             ]
-        , p [ HA.class "ex-blurb" ] [ text e.blurb ]
-        , asyncControls e
-        , div [ HA.class "ex-grid" ] [ View.view (gridConfig e) e.sheet ]
+        )
+
+
+gridClass : Example -> String
+gridClass e =
+    if e.wrapClass == "" then
+        "ex-grid"
+
+    else
+        "ex-grid " ++ e.wrapClass
+
+
+{-| Inject a scoped stylesheet for an example (used by the custom-theme example). The
+same string is shown to the reader by `cssPanel`, so what's applied is exactly what's
+displayed. -}
+styleNode : Maybe String -> List (Html Msg)
+styleNode maybeCss =
+    case maybeCss of
+        Just css ->
+            [ Html.node "style" [] [ text css ] ]
+
+        Nothing ->
+            []
+
+
+cssPanel : Maybe String -> List (Html Msg)
+cssPanel maybeCss =
+    case maybeCss of
+        Just css ->
+            [ div [ HA.class "css-panel" ]
+                [ div [ HA.class "css-cap" ] [ text "The CSS applied to this grid:" ]
+                , pre [ HA.class "code" ] [ text css ]
+                ]
+            ]
+
+        Nothing ->
+            []
+
+
+{-| The rich-text formatting toolbar, acting on the example's selected cell. Active
+states are read back from that cell's current style. -}
+formattingToolbar : Example -> Html Msg
+formattingToolbar e =
+    let
+        cur =
+            Sheet.baseStyleAt e.selected e.sheet
+    in
+    div [ HA.class "fmt-toolbar" ]
+        [ span [ HA.class "fmt-cell" ] [ text (Ref.toA1 e.selected) ]
+        , select [ HA.class "fsel", HA.value (Maybe.withDefault "" (Style.fontFamilyOf cur)), HE.onInput (FmtFont e.id) ]
+            (List.map (\( v, lbl ) -> option [ HA.value v ] [ text lbl ]) fontOptions)
+        , select [ HA.class "fsel fsel-sm", HA.value (String.fromInt (Maybe.withDefault 13 (Style.fontSizeOf cur))), HE.onInput (FmtSize e.id) ]
+            (List.map (\n -> option [ HA.value (String.fromInt n) ] [ text (String.fromInt n) ]) sizeOptions)
+        , fmtBtn (Style.isBold cur) (FmtBold e.id) "fmt-b" "B"
+        , fmtBtn (Style.isItalic cur) (FmtItalic e.id) "fmt-i" "I"
+        , fmtBtn (Style.isUnderline cur) (FmtUnderline e.id) "fmt-u" "U"
+        , fmtBtn (Style.isStrike cur) (FmtStrike e.id) "fmt-s" "S"
+        , fmtBtn (Style.alignOf cur == Just Style.AlignLeft) (FmtAlign e.id Style.AlignLeft) "" "⇤"
+        , fmtBtn (Style.alignOf cur == Just Style.AlignCenter) (FmtAlign e.id Style.AlignCenter) "" "↔"
+        , fmtBtn (Style.alignOf cur == Just Style.AlignRight) (FmtAlign e.id Style.AlignRight) "" "⇥"
+        , label [ HA.class "fcolor" ]
+            [ span [ HA.class "fcolor-lbl" ] [ text "A" ]
+            , input [ HA.type_ "color", HA.value (Maybe.withDefault "#202124" (Style.colorOf cur)), HE.onInput (FmtColor e.id) ] []
+            ]
+        , label [ HA.class "fcolor" ]
+            [ span [ HA.class "fcolor-lbl" ] [ text "▉" ]
+            , input [ HA.type_ "color", HA.value (Maybe.withDefault "#ffffff" (Style.backgroundOf cur)), HE.onInput (FmtBackground e.id) ] []
+            ]
         ]
+
+
+fmtBtn : Bool -> Msg -> String -> String -> Html Msg
+fmtBtn active msg extra glyph =
+    button
+        [ HA.class
+            (String.join " "
+                (List.filter (\c -> c /= "")
+                    [ "fbtn"
+                    , extra
+                    , if active then
+                        "fbtn-on"
+
+                      else
+                        ""
+                    ]
+                )
+            )
+        , HE.onClick msg
+        ]
+        [ text glyph ]
+
+
+fontOptions : List ( String, String )
+fontOptions =
+    [ ( "", "Default" )
+    , ( "-apple-system, 'Segoe UI', Roboto, sans-serif", "Sans-serif" )
+    , ( "Georgia, 'Times New Roman', serif", "Serif" )
+    , ( "'Courier New', ui-monospace, monospace", "Monospace" )
+    , ( "'Comic Sans MS', 'Segoe Print', cursive", "Comic" )
+    ]
+
+
+sizeOptions : List Int
+sizeOptions =
+    [ 10, 11, 12, 13, 14, 16, 18, 20, 24 ]
 
 
 asyncControls : Example -> Html Msg
@@ -517,6 +783,11 @@ cells a b =
 withFormat : List Ref -> Format -> Sheet -> Sheet
 withFormat refs fmt sheet =
     List.foldl (\r acc -> Sheet.setFormat r fmt acc) sheet refs
+
+
+withStyle : List Ref -> (Style.CellStyle -> Style.CellStyle) -> Sheet -> Sheet
+withStyle refs f sheet =
+    List.foldl (\r acc -> Sheet.setStyle r (f (Sheet.baseStyleAt r acc)) acc) sheet refs
 
 
 classStyle : String -> Style.CellStyle
