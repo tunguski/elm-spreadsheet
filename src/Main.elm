@@ -47,6 +47,7 @@ main =
 type alias Model =
     { examples : List Example
     , drag : Maybe Drag
+    , selecting : Maybe Int
     }
 
 
@@ -67,6 +68,10 @@ type alias Example =
     , blurb : String
     , sheet : Sheet
     , selected : Ref
+    , anchor : Ref
+    , clip : Maybe Ref.Range
+    , past : List Sheet
+    , future : List Sheet
     , editing : Maybe ( Ref, String )
     , cols : Int
     , rows : Int
@@ -97,6 +102,7 @@ init _ =
             , exAsync
             ]
       , drag = Nothing
+      , selecting = Nothing
       }
     , Cmd.none
     )
@@ -107,7 +113,14 @@ init _ =
 
 
 type Msg
-    = Select Int Ref
+    = CellDown Int Ref Bool
+    | CellEnter Int Ref
+    | SelectUp
+    | Undo Int
+    | Redo Int
+    | CopySel Int
+    | PasteSel Int
+    | FillSel Int
     | StartEdit Int Ref
     | EditInput Int String
     | NavKey Int View.KeyEvent
@@ -140,10 +153,41 @@ type Msg
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        Select id ref ->
-            -- Clicking a cell commits any pending edit and focuses the grid so the
-            -- keyboard takes over immediately.
-            ( mapExample id (\e -> { e | selected = ref } |> commitPending) model, focusGrid id )
+        CellDown id ref shift ->
+            -- Mousedown commits any pending edit, sets/extends the selection and starts a
+            -- drag-select; the grid takes keyboard focus so navigation continues.
+            ( { model | selecting = Just id }
+                |> mapExample id (\e -> selectCell ref shift (commitPending e))
+            , focusGrid id
+            )
+
+        CellEnter id ref ->
+            -- Extend the selection to the hovered cell while a drag is in progress.
+            ( if model.selecting == Just id then
+                mapExample id (\e -> { e | selected = ref }) model
+
+              else
+                model
+            , Cmd.none
+            )
+
+        SelectUp ->
+            ( { model | selecting = Nothing }, Cmd.none )
+
+        Undo id ->
+            ( mapExample id undo model, focusGrid id )
+
+        Redo id ->
+            ( mapExample id redo model, focusGrid id )
+
+        CopySel id ->
+            ( mapExample id copySel model, focusGrid id )
+
+        PasteSel id ->
+            ( mapExample id pasteSel model, focusGrid id )
+
+        FillSel id ->
+            ( mapExample id fillSel model, focusGrid id )
 
         StartEdit id ref ->
             ( mapExample id (\e -> { e | selected = ref, editing = Just ( ref, Sheet.rawAt ref e.sheet ) }) model
@@ -270,34 +314,148 @@ restyle id f model =
         model
 
 
+{-| The current selection block: the rectangle from the anchor to the active cell. -}
+selectionOf : Example -> Ref.Range
+selectionOf e =
+    Ref.normalize { start = e.anchor, end = e.selected }
+
+
+{-| Point/extend the selection. Shift keeps the anchor (growing the block); a plain click
+collapses it to the one cell. -}
+selectCell : Ref -> Bool -> Example -> Example
+selectCell ref shift e =
+    if shift then
+        { e | selected = ref }
+
+    else
+        { e | selected = ref, anchor = ref }
+
+
+{-| Snapshot the sheet onto the undo stack (and drop the redo stack) before a mutation. -}
+record : Example -> Example
+record e =
+    { e | past = List.take historyCap (e.sheet :: e.past), future = [] }
+
+
+historyCap : Int
+historyCap =
+    100
+
+
+undo : Example -> Example
+undo e =
+    case e.past of
+        prev :: rest ->
+            clampSel { e | sheet = prev, past = rest, future = e.sheet :: e.future, editing = Nothing }
+
+        [] ->
+            e
+
+
+redo : Example -> Example
+redo e =
+    case e.future of
+        next :: rest ->
+            clampSel { e | sheet = next, future = rest, past = e.sheet :: e.past, editing = Nothing }
+
+        [] ->
+            e
+
+
+{-| Keep the active cell and anchor inside the sheet's dimensions (they can fall outside
+after an undo that changes the grid size). -}
+clampSel : Example -> Example
+clampSel e =
+    let
+        ( rows, cols ) =
+            Sheet.dims e.sheet
+
+        clampRef r =
+            { col = clamp 0 (cols - 1) r.col, row = clamp 0 (rows - 1) r.row }
+    in
+    { e | selected = clampRef e.selected, anchor = clampRef e.anchor }
+
+
+{-| Copy the current selection block to the example's clipboard. -}
+copySel : Example -> Example
+copySel e =
+    { e | clip = Just (selectionOf e) }
+
+
+{-| Paste the clipboard block with its top-left at the active cell (relative references
+translate, `$`-absolute ones stay), recording an undo step. -}
+pasteSel : Example -> Example
+pasteSel e =
+    case e.clip of
+        Just src ->
+            let
+                e1 =
+                    record e
+
+                dest =
+                    { start = e1.selected
+                    , end =
+                        { col = e1.selected.col + Ref.width src - 1
+                        , row = e1.selected.row + Ref.height src - 1
+                        }
+                    }
+            in
+            recalcExample (Ref.cellsOf dest) { e1 | sheet = Sheet.copyPaste src e1.selected e1.sheet }
+
+        Nothing ->
+            e
+
+
+{-| Fill the selection downward from its top row (relative references shift), recording an
+undo step. -}
+fillSel : Example -> Example
+fillSel e =
+    let
+        e1 =
+            record e
+
+        sel =
+            selectionOf e1
+    in
+    recalcExample (Ref.cellsOf sel) { e1 | sheet = Sheet.fillDown sel e1.sheet }
+
+
 {-| Apply a structural edit (insert/delete/sort), recompute the whole sheet, and keep the
 selection in range. These changes ripple across many cells, so a full recalc is simplest
 and these example sheets are tiny. -}
 structuralEdit : (Example -> Sheet) -> Example -> Example
 structuralEdit f e =
     let
+        e1 =
+            record e
+
         sheet2 =
-            Sheet.recalcAll (f e)
+            Sheet.recalcAll (f e1)
 
         ( rows, cols ) =
             Sheet.dims sheet2
+
+        clampRef r =
+            { col = clamp 0 (cols - 1) r.col, row = clamp 0 (rows - 1) r.row }
     in
-    { e
+    { e1
         | sheet = sheet2
         , editing = Nothing
-        , selected =
-            { col = clamp 0 (cols - 1) e.selected.col
-            , row = clamp 0 (rows - 1) e.selected.row
-            }
+        , selected = clampRef e1.selected
+        , anchor = clampRef e1.anchor
     }
 
 
-{-| Commit the in-progress edit (if any) and recalculate. -}
+{-| Commit the in-progress edit (if any) and recalculate, recording an undo step. -}
 commitPending : Example -> Example
 commitPending e =
     case e.editing of
         Just ( ref, txt ) ->
-            recalcExample [ ref ] { e | editing = Nothing, sheet = Sheet.setRaw ref txt e.sheet }
+            let
+                e1 =
+                    record e
+            in
+            recalcExample [ ref ] { e1 | editing = Nothing, sheet = Sheet.setRaw ref txt e1.sheet }
 
         Nothing ->
             e
@@ -312,38 +470,65 @@ nothing to commit), Backspace/Delete clear, and a printable key starts editing t
 with that character — like Excel/Sheets. -}
 navKey : Int -> View.KeyEvent -> Model -> ( Model, Cmd Msg )
 navKey id ke model =
-    case ke.key of
-        "ArrowUp" ->
-            ( mapExample id (moveSelected 0 (-1)) model, Cmd.none )
+    if ke.ctrl || ke.meta then
+        case String.toLower ke.key of
+            "z" ->
+                ( mapExample id
+                    (if ke.shift then
+                        redo
 
-        "ArrowDown" ->
-            ( mapExample id (moveSelected 0 1) model, Cmd.none )
+                     else
+                        undo
+                    )
+                    model
+                , Cmd.none
+                )
 
-        "ArrowLeft" ->
-            ( mapExample id (moveSelected (-1) 0) model, Cmd.none )
+            "y" ->
+                ( mapExample id redo model, Cmd.none )
 
-        "ArrowRight" ->
-            ( mapExample id (moveSelected 1 0) model, Cmd.none )
+            "c" ->
+                ( mapExample id copySel model, Cmd.none )
 
-        "Tab" ->
-            ( mapExample id (moveSelected (horiz ke) 0) model, Cmd.none )
+            "v" ->
+                ( mapExample id pasteSel model, Cmd.none )
 
-        "Enter" ->
-            ( mapExample id (moveSelected 0 (vert ke)) model, Cmd.none )
-
-        "Backspace" ->
-            ( mapExample id clearSelected model, Cmd.none )
-
-        "Delete" ->
-            ( mapExample id clearSelected model, Cmd.none )
-
-        _ ->
-            if String.length ke.key == 1 && not ke.ctrl && not ke.meta then
-                -- type-to-edit: open the cell seeded with the typed character
-                ( mapExample id (\e -> { e | editing = Just ( e.selected, ke.key ) }) model, focusEdit id )
-
-            else
+            _ ->
                 ( model, Cmd.none )
+
+    else
+        case ke.key of
+            "ArrowUp" ->
+                ( mapExample id (arrowMove ke 0 (-1)) model, Cmd.none )
+
+            "ArrowDown" ->
+                ( mapExample id (arrowMove ke 0 1) model, Cmd.none )
+
+            "ArrowLeft" ->
+                ( mapExample id (arrowMove ke (-1) 0) model, Cmd.none )
+
+            "ArrowRight" ->
+                ( mapExample id (arrowMove ke 1 0) model, Cmd.none )
+
+            "Tab" ->
+                ( mapExample id (collapseMove (horiz ke) 0) model, Cmd.none )
+
+            "Enter" ->
+                ( mapExample id (collapseMove 0 (vert ke)) model, Cmd.none )
+
+            "Backspace" ->
+                ( mapExample id clearSelection model, Cmd.none )
+
+            "Delete" ->
+                ( mapExample id clearSelection model, Cmd.none )
+
+            _ ->
+                if String.length ke.key == 1 then
+                    -- type-to-edit: open the cell seeded with the typed character
+                    ( mapExample id (\e -> { e | editing = Just ( e.selected, ke.key ) }) model, focusEdit id )
+
+                else
+                    ( model, Cmd.none )
 
 
 {-| Keys while editing a cell: Enter commits & moves down (Shift+Enter up), Tab commits &
@@ -392,14 +577,47 @@ moveSelected dc dr e =
     }
 
 
+{-| Arrow key: Shift extends the selection (anchor stays), a plain arrow collapses it to
+the moved cell. -}
+arrowMove : View.KeyEvent -> Int -> Int -> Example -> Example
+arrowMove ke dc dr e =
+    let
+        moved =
+            moveSelected dc dr e
+    in
+    if ke.shift then
+        moved
+
+    else
+        { moved | anchor = moved.selected }
+
+
+{-| Tab/Enter: commit any edit, move, and collapse the selection to the one cell. -}
+collapseMove : Int -> Int -> Example -> Example
+collapseMove dc dr e =
+    let
+        moved =
+            commitMove dc dr e
+    in
+    { moved | anchor = moved.selected }
+
+
 commitMove : Int -> Int -> Example -> Example
 commitMove dc dr e =
     moveSelected dc dr (commitPending e)
 
 
-clearSelected : Example -> Example
-clearSelected e =
-    recalcExample [ e.selected ] { e | sheet = Sheet.setRaw e.selected "" e.sheet }
+{-| Clear every cell in the selection block (recording an undo step). -}
+clearSelection : Example -> Example
+clearSelection e =
+    let
+        e1 =
+            record e
+
+        toClear =
+            Ref.cellsOf (selectionOf e1)
+    in
+    recalcExample toClear { e1 | sheet = List.foldl (\r acc -> Sheet.setRaw r "" acc) e1.sheet toClear }
 
 
 
@@ -525,6 +743,14 @@ subscriptions model =
 
             Nothing ->
                 Sub.none
+
+        -- End a drag-select wherever the mouse button is released.
+        , case model.selecting of
+            Just _ ->
+                Browser.Events.onMouseUp (Json.Decode.succeed SelectUp)
+
+            Nothing ->
+                Sub.none
         ]
 
 
@@ -545,6 +771,10 @@ example id title blurb cols rows sheet =
     , blurb = blurb
     , sheet = sheet
     , selected = { col = 0, row = 0 }
+    , anchor = { col = 0, row = 0 }
+    , clip = Nothing
+    , past = []
+    , future = []
     , editing = Nothing
     , cols = cols
     , rows = rows
@@ -765,12 +995,12 @@ exEdit =
         e =
             example 8
                 "Edit structure: insert, delete & sort"
-                "Select a cell, then use the toolbar. Insert or delete a row/column and every formula rewrites itself — the Total column’s SUM ranges grow, shrink, and a reference into a deleted cell becomes #REF!, just like Excel. Sort ↑/↓ reorders the three expense rows by the selected column, carrying each whole row. (The library also does copy/paste with relative-reference translation, autofill & series, named ranges and CSV — all covered by the test suite.)"
+                "Select a range — drag across cells, Shift-click or Shift-arrow — then use the toolbar. Insert or delete a row/column and every formula rewrites itself: the Total column’s SUM ranges grow, shrink, and a reference into a deleted cell becomes #REF!, just like Excel. Copy/Paste translates relative references; Fill ↓ copies the top row down; Sort ↑/↓ reorders the expense rows by the selected column. Every change is undoable — Undo/Redo or Ctrl+Z / Ctrl+Shift+Z, and Ctrl+C / Ctrl+V to copy and paste."
                 5
                 6
                 editSheet
     in
-    { e | editTools = True, selected = ref "E2", dataRange = rangeOf "A2" "D4" }
+    { e | editTools = True, selected = ref "E2", anchor = ref "E2", dataRange = rangeOf "A2" "D4" }
 
 
 editSheet : Sheet
@@ -799,6 +1029,10 @@ exAsync =
             , ( "A2", "Press “Load” above to populate this sheet, then scroll." )
             ]
     , selected = { col = 0, row = 0 }
+    , anchor = { col = 0, row = 0 }
+    , clip = Nothing
+    , past = []
+    , future = []
     , editing = Nothing
     , cols = 8
     , rows = 22
@@ -861,7 +1095,7 @@ appView : Model -> Html Msg
 appView model =
     div [ HA.class "page" ]
         [ header
-        , div [ HA.class "gallery" ] (List.map exampleView model.examples)
+        , div [ HA.class "gallery" ] (List.map (exampleView model.selecting) model.examples)
         , footer
         ]
 
@@ -875,8 +1109,8 @@ header =
         ]
 
 
-exampleView : Example -> Html Msg
-exampleView e =
+exampleView : Maybe Int -> Example -> Html Msg
+exampleView selecting e =
     section [ HA.class "ex" ]
         (List.concat
             [ [ div [ HA.class "ex-head" ]
@@ -897,7 +1131,7 @@ exampleView e =
                 []
             , [ asyncControls e ]
             , styleNode e.css
-            , [ div [ HA.class (gridClass e) ] [ View.view (gridConfig e) e.sheet ] ]
+            , [ div [ HA.class (gridClass e) ] [ View.view (gridConfig (selecting == Just e.id) e) e.sheet ] ]
             , cssPanel e.css
             ]
         )
@@ -979,24 +1213,45 @@ formattingToolbar e =
         ]
 
 
-{-| The structural-edit toolbar, acting on the example's selected cell. -}
+{-| The structural-edit toolbar, acting on the example's selection. -}
 editToolbar : Example -> Html Msg
 editToolbar e =
     div [ HA.class "fmt-toolbar" ]
-        [ span [ HA.class "fmt-cell" ] [ text (Ref.toA1 e.selected) ]
-        , editBtn (InsertRow e.id) "＋ Row"
-        , editBtn (DeleteRow e.id) "－ Row"
-        , editBtn (InsertCol e.id) "＋ Col"
-        , editBtn (DeleteCol e.id) "－ Col"
+        [ span [ HA.class "fmt-cell" ] [ text (selectionLabel e) ]
+        , editBtn True (InsertRow e.id) "＋ Row"
+        , editBtn True (DeleteRow e.id) "－ Row"
+        , editBtn True (InsertCol e.id) "＋ Col"
+        , editBtn True (DeleteCol e.id) "－ Col"
         , span [ HA.class "fmt-sep" ] []
-        , editBtn (SortCol e.id True) "Sort ↑"
-        , editBtn (SortCol e.id False) "Sort ↓"
+        , editBtn True (SortCol e.id True) "Sort ↑"
+        , editBtn True (SortCol e.id False) "Sort ↓"
+        , span [ HA.class "fmt-sep" ] []
+        , editBtn True (CopySel e.id) "Copy"
+        , editBtn (e.clip /= Nothing) (PasteSel e.id) "Paste"
+        , editBtn True (FillSel e.id) "Fill ↓"
+        , span [ HA.class "fmt-sep" ] []
+        , editBtn (not (List.isEmpty e.past)) (Undo e.id) "↶ Undo"
+        , editBtn (not (List.isEmpty e.future)) (Redo e.id) "↷ Redo"
         ]
 
 
-editBtn : Msg -> String -> Html Msg
-editBtn msg lbl =
-    button [ HA.class "ebtn", HE.onClick msg ] [ text lbl ]
+{-| A range label, collapsed to a single ref when the selection is one cell. -}
+selectionLabel : Example -> String
+selectionLabel e =
+    let
+        sel =
+            selectionOf e
+    in
+    if sel.start == sel.end then
+        Ref.toA1 sel.start
+
+    else
+        Ref.rangeToA1 sel
+
+
+editBtn : Bool -> Msg -> String -> Html Msg
+editBtn enabled msg lbl =
+    button [ HA.class "ebtn", HA.disabled (not enabled), HE.onClick msg ] [ text lbl ]
 
 
 fmtBtn : Bool -> Msg -> String -> String -> Html Msg
@@ -1060,17 +1315,20 @@ asyncControls e =
         text ""
 
 
-gridConfig : Example -> View.Config Msg
-gridConfig e =
+gridConfig : Bool -> Example -> View.Config Msg
+gridConfig dragging e =
     { id = gridDomId e.id
     , viewCols = e.cols
     , viewRows = e.rows
     , totalRows = e.totalRows
     , firstRow = e.firstRow
     , selected = Just e.selected
+    , selection = Just (selectionOf e)
+    , dragging = dragging
     , editing = e.editing
     , colWidth = \c -> Sheet.colWidth c e.sheet
-    , onSelect = Select e.id
+    , onCellDown = CellDown e.id
+    , onCellEnter = CellEnter e.id
     , onStartEdit = StartEdit e.id
     , onEditInput = EditInput e.id
     , onNavKey = NavKey e.id

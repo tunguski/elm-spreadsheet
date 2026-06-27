@@ -285,6 +285,11 @@ body {
     background: #eef1f6;
 }
 
+.ebtn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
 .fmt-sep {
     width: 1px;
     align-self: stretch;
@@ -530,6 +535,12 @@ body {
     overflow: hidden;
     cursor: cell;
     background: #fff;
+    user-select: none;
+}
+
+.ss-cell.ss-in-range {
+    background: var(--ss-selected-bg);
+    box-shadow: inset 0 0 0 1px var(--ss-selected);
 }
 
 .ss-cell-content {

@@ -29,7 +29,7 @@ import Html exposing (Html, div, input, span, table, tbody, td, text, th, thead,
 import Html.Attributes as HA
 import Html.Events as HE
 import Json.Decode
-import Spreadsheet.Ref as Ref exposing (Ref)
+import Spreadsheet.Ref as Ref exposing (Range, Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 
 
@@ -53,9 +53,12 @@ type alias Config msg =
     , totalRows : Int
     , firstRow : Int
     , selected : Maybe Ref
+    , selection : Maybe Range
+    , dragging : Bool
     , editing : Maybe ( Ref, String )
     , colWidth : Int -> Int
-    , onSelect : Ref -> msg
+    , onCellDown : Ref -> Bool -> msg
+    , onCellEnter : Ref -> msg
     , onStartEdit : Ref -> msg
     , onEditInput : String -> msg
     , onNavKey : KeyEvent -> msg
@@ -227,26 +230,54 @@ displayCell config sheet ref =
         rendered =
             Sheet.renderedStyle ref sheet
 
-        selectedClass =
-            if config.selected == Just ref then
+        isActive =
+            config.selected == Just ref
+
+        stateClasses =
+            (if isActive then
                 [ "ss-selected" ]
 
-            else
+             else
                 []
+            )
+                ++ (if inSelection config ref && not isActive then
+                        [ "ss-in-range" ]
+
+                    else
+                        []
+                   )
 
         classAttr =
-            HA.class (String.join " " ("ss-cell" :: rendered.classes ++ selectedClass))
+            HA.class (String.join " " ("ss-cell" :: rendered.classes ++ stateClasses))
 
         inlineAttrs =
             List.map (\( prop, val ) -> HA.style prop val) rendered.inline
+
+        dragAttrs =
+            if config.dragging then
+                [ cellEnterHandler config ref ]
+
+            else
+                []
     in
     td
         (classAttr
-            :: HE.onClick (config.onSelect ref)
+            :: cellDownHandler config ref
             :: HE.onDoubleClick (config.onStartEdit ref)
-            :: inlineAttrs
+            :: (dragAttrs ++ inlineAttrs)
         )
         [ div [ HA.class "ss-cell-content" ] [ text (Sheet.displayString ref sheet) ] ]
+
+
+{-| Is a cell within the highlighted selection block? -}
+inSelection : Config msg -> Ref -> Bool
+inSelection config ref =
+    case config.selection of
+        Just range ->
+            Ref.contains range ref
+
+        Nothing ->
+            False
 
 
 
@@ -289,6 +320,22 @@ editHandler config =
         )
 
 
+{-| Mousedown on a cell: begins a selection (or extends it when Shift is held), reporting
+the cell and the shift-key state. -}
+cellDownHandler : Config msg -> Ref -> Html.Attribute msg
+cellDownHandler config ref =
+    HE.on "mousedown"
+        (Json.Decode.field "shiftKey" Json.Decode.bool
+            |> Json.Decode.andThen (\sh -> Json.Decode.succeed (config.onCellDown ref sh))
+        )
+
+
+{-| Mouse entering a cell while a drag-select is in progress extends the selection. -}
+cellEnterHandler : Config msg -> Ref -> Html.Attribute msg
+cellEnterHandler config ref =
+    HE.on "mouseenter" (Json.Decode.succeed (config.onCellEnter ref))
+
+
 resizeHandler : Config msg -> Int -> Html.Attribute msg
 resizeHandler config col =
     HE.preventDefaultOn "mousedown"
@@ -308,9 +355,14 @@ scrollHandler config =
 
 navHandled : KeyEvent -> Bool
 navHandled ke =
-    isArrow ke.key
-        || List.member ke.key [ "Tab", "Enter", "Backspace", "Delete" ]
-        || (isPrintable ke.key && not ke.ctrl && not ke.meta)
+    if ke.ctrl || ke.meta then
+        -- the editing shortcuts the grid owns; let every other Ctrl/Cmd combo through
+        List.member (String.toLower ke.key) [ "z", "y", "c", "v" ]
+
+    else
+        isArrow ke.key
+            || List.member ke.key [ "Tab", "Enter", "Backspace", "Delete" ]
+            || isPrintable ke.key
 
 
 isArrow : String -> Bool

@@ -30,11 +30,13 @@ engine is pure and effect-free, so it is fully unit-tested without a browser.
   restyle everything — the demo includes a Solarized-beige theme); only data-driven values
   (colour, font, size, bar widths) are emitted inline. A `with*/toggle*/…Of` API on
   `Style` backs a Word-style formatting toolbar in the demo.
-- **Keyboard-driven grid.** The `View` grid is focusable and navigates like Excel/Sheets:
-  arrow keys move the selection, a printable key starts editing the cell, **Enter** commits
-  and moves down (**Shift+Enter** up), **Tab** commits and moves right (**Shift+Tab** left),
-  **Esc** cancels, and **Backspace/Delete** clears. Columns are resized by dragging the
-  border on a column header.
+- **Keyboard-driven grid with range selection.** The `View` grid is focusable and navigates
+  like Excel/Sheets: arrow keys move the selection, a printable key starts editing the cell,
+  **Enter** commits and moves down (**Shift+Enter** up), **Tab** commits and moves right
+  (**Shift+Tab** left), **Esc** cancels, **Backspace/Delete** clears. Select a **range** by
+  dragging, Shift-clicking or Shift-arrowing; **Ctrl+C/Ctrl+V** copy and paste a block (with
+  relative-reference translation) and **Ctrl+Z / Ctrl+Shift+Z** undo and redo. Columns are
+  resized by dragging the border on a column header.
 - **Absolute & relative references.** `$A$1`, `$A1`, `A$1` are parsed, evaluated, displayed
   and honoured by copy/fill — the basis for spreadsheet-correct reference behaviour.
 - **Structural editing.** Insert or delete whole rows and columns and every formula rewrites
