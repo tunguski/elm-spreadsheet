@@ -508,23 +508,24 @@ parseIdentifier name tokens =
             Ok ( Lit (VBool False), tokens )
 
         _ ->
-            case Ref.fromA1 name of
-                Just startRef ->
+            case Ref.fromA1Abs name of
+                Just ( startRef, startAbs ) ->
                     case tokens of
                         TColon :: (TIdent endName) :: rest ->
-                            case Ref.fromA1 endName of
-                                Just endRef ->
-                                    Ok ( RangeE { start = startRef, end = endRef }, rest )
+                            case Ref.fromA1Abs endName of
+                                Just ( endRef, endAbs ) ->
+                                    Ok ( RangeE { start = startRef, end = endRef } startAbs endAbs, rest )
 
                                 Nothing ->
                                     Err ("bad range end: " ++ endName)
 
                         _ ->
-                            Ok ( RefE startRef, tokens )
+                            Ok ( RefE startRef startAbs, tokens )
 
                 Nothing ->
-                    -- An unknown bare name → #NAME? at eval time.
-                    Ok ( Func "#NAME" [ Lit (VText name) ], tokens )
+                    -- An unknown bare name → resolved against the sheet's name table at
+                    -- eval time (or #NAME? if undefined).
+                    Ok ( NameE (String.toUpper name), tokens )
 
 
 parseCall : String -> List Token -> Result String ( Expr, List Token )

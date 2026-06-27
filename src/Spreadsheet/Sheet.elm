@@ -33,6 +33,21 @@ module Spreadsheet.Sheet exposing
     , defaultColWidth
     , colWidth
     , setColWidth
+    , insertRows
+    , deleteRows
+    , insertCols
+    , deleteCols
+    , copyPaste
+    , cutPaste
+    , fillDown
+    , fillRight
+    , fillSeries
+    , sortRange
+    , filterRows
+    , defineName
+    , clearName
+    , nameOf
+    , definedNames
     )
 
 {-| The spreadsheet model and its (synchronous) recalculation engine.
@@ -70,6 +85,8 @@ import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format exposing (Format)
 import Spreadsheet.Parser as Parser
 import Spreadsheet.Ref as Ref exposing (Range, Ref)
+import Spreadsheet.Refactor as Refactor
+import Spreadsheet.Render as Render
 import Spreadsheet.Style as Style exposing (CellStyle, ColorScale, DataBar, Rendered, Rule)
 import Spreadsheet.Value as Value exposing (Value(..))
 
@@ -105,6 +122,7 @@ type alias Model =
     , colorScales : List ColorScale
     , dataBars : List DataBar
     , colWidths : Dict Int Int
+    , names : Dict String Range
     }
 
 
@@ -119,6 +137,7 @@ empty rows cols =
         , colorScales = []
         , dataBars = []
         , colWidths = Dict.empty
+        , names = Dict.empty
         }
 
 
@@ -324,10 +343,21 @@ precedentsOf (Sheet m) k =
         Just cell ->
             case cell.parsed of
                 PFormula expr ->
-                    Deps.precedents expr
+                    Deps.precedentsWith (resolveNameKeys m) expr
 
                 _ ->
                     []
+
+        Nothing ->
+            []
+
+
+{-| Cell keys a defined name stands for (empty if undefined). -}
+resolveNameKeys : Model -> String -> List ( Int, Int )
+resolveNameKeys m name =
+    case Dict.get name m.names of
+        Just range ->
+            List.map key (Ref.cellsOf range)
 
         Nothing ->
             []
@@ -435,6 +465,7 @@ evalAndSet k ((Sheet m) as sheet) =
                         ctx =
                             { lookup = \r -> valueAt r sheet
                             , self = keyToRef k
+                            , names = \name -> Dict.get name m.names
                             }
 
                         value =
@@ -487,6 +518,476 @@ runRecalc dirty sheet =
             List.foldl evalAndSet sheet ordered
     in
     markCircular (Set.toList cyclic) evaluated
+
+
+
+-- STRUCTURAL EDITS -----------------------------------------------------------
+-- Insert/delete whole rows or columns. Cells shift to their new positions, every
+-- formula's references are rewritten (a reference into a deleted band becomes #REF!),
+-- and the layered ranges (conditional formats, colour scales, data bars, named ranges)
+-- and column widths move with them. Recalculate afterwards.
+
+
+{-| Insert `n` blank rows before row `at`. -}
+insertRows : Int -> Int -> Sheet -> Sheet
+insertRows at n (Sheet m) =
+    Sheet
+        (adjustRanges (Refactor.insertRowsRange at n)
+            { m
+                | cells = remapCells (\( c, r ) -> Just ( c, insAt at n r )) (Refactor.insertRows at n) m.cells
+                , rows = m.rows + n
+            }
+        )
+
+
+{-| Delete `n` rows starting at row `at`. -}
+deleteRows : Int -> Int -> Sheet -> Sheet
+deleteRows at n (Sheet m) =
+    Sheet
+        (adjustRanges (Refactor.deleteRowsRange at n)
+            { m
+                | cells = remapCells (\( c, r ) -> Maybe.map (\r2 -> ( c, r2 )) (delAt at n r)) (Refactor.deleteRows at n) m.cells
+                , rows = max 1 (m.rows - n)
+            }
+        )
+
+
+{-| Insert `n` blank columns before column `at`. -}
+insertCols : Int -> Int -> Sheet -> Sheet
+insertCols at n (Sheet m) =
+    Sheet
+        (adjustRanges (Refactor.insertColsRange at n)
+            { m
+                | cells = remapCells (\( c, r ) -> Just ( insAt at n c, r )) (Refactor.insertCols at n) m.cells
+                , cols = m.cols + n
+                , colWidths = remapIntKeys (\c -> Just (insAt at n c)) m.colWidths
+            }
+        )
+
+
+{-| Delete `n` columns starting at column `at`. -}
+deleteCols : Int -> Int -> Sheet -> Sheet
+deleteCols at n (Sheet m) =
+    Sheet
+        (adjustRanges (Refactor.deleteColsRange at n)
+            { m
+                | cells = remapCells (\( c, r ) -> Maybe.map (\c2 -> ( c2, r )) (delAt at n c)) (Refactor.deleteCols at n) m.cells
+                , cols = max 1 (m.cols - n)
+                , colWidths = remapIntKeys (delAt at n) m.colWidths
+            }
+        )
+
+
+{-| A coordinate's new position after `n` units are inserted before `at`. -}
+insAt : Int -> Int -> Int -> Int
+insAt at n c =
+    if c >= at then
+        c + n
+
+    else
+        c
+
+
+{-| A coordinate's new position after `n` units are deleted from `at` (Nothing if it sat
+in the deleted band). -}
+delAt : Int -> Int -> Int -> Maybe Int
+delAt at n c =
+    if c < at then
+        Just c
+
+    else if c >= at + n then
+        Just (c - n)
+
+    else
+        Nothing
+
+
+{-| Rebuild the cell dict, moving each cell's key and rewriting its formula; drop cells
+whose key maps to `Nothing`. -}
+remapCells : (( Int, Int ) -> Maybe ( Int, Int )) -> (Expr -> Expr) -> Dict ( Int, Int ) Cell -> Dict ( Int, Int ) Cell
+remapCells keyMap fExpr cells =
+    Dict.foldl
+        (\k cell acc ->
+            case keyMap k of
+                Just nk ->
+                    Dict.insert nk (rewriteFormulaCell fExpr cell) acc
+
+                Nothing ->
+                    acc
+        )
+        Dict.empty
+        cells
+
+
+remapIntKeys : (Int -> Maybe Int) -> Dict Int v -> Dict Int v
+remapIntKeys f d =
+    Dict.foldl
+        (\k v acc ->
+            case f k of
+                Just nk ->
+                    Dict.insert nk v acc
+
+                Nothing ->
+                    acc
+        )
+        Dict.empty
+        d
+
+
+{-| Apply a formula transform to a cell, refreshing its raw text from the rewritten tree
+and clearing its cached value (recompute on the next recalc). Literals are untouched. -}
+rewriteFormulaCell : (Expr -> Expr) -> Cell -> Cell
+rewriteFormulaCell f cell =
+    case cell.parsed of
+        PFormula expr ->
+            let
+                e2 =
+                    f expr
+            in
+            { cell | parsed = PFormula e2, raw = Render.formula e2, value = VEmpty }
+
+        _ ->
+            cell
+
+
+{-| Move every layered range (conditional rules, colour scales, data bars, named ranges)
+through `f`, dropping any that the change removed entirely. -}
+adjustRanges : (Range -> Maybe Range) -> Model -> Model
+adjustRanges f m =
+    { m
+        | conditionals = List.filterMap (\rule -> Maybe.map (\rng -> { rule | range = rng }) (f rule.range)) m.conditionals
+        , colorScales = List.filterMap (\cs -> Maybe.map (\rng -> { cs | range = rng }) (f cs.range)) m.colorScales
+        , dataBars = List.filterMap (\db -> Maybe.map (\rng -> { db | range = rng }) (f db.range)) m.dataBars
+        , names =
+            Dict.toList m.names
+                |> List.filterMap (\( nm, rng ) -> Maybe.map (\r -> ( nm, r )) (f rng))
+                |> Dict.fromList
+    }
+
+
+
+-- CLIPBOARD ------------------------------------------------------------------
+
+
+{-| Copy the `from` block and paste it with its top-left at `to`. **Copy semantics**:
+relative references in the pasted formulas shift by the paste offset, `$`-absolute ones
+stay pinned (`=A1+$B$1` pasted one row down becomes `=A2+$B$1`). Recalculate afterwards. -}
+copyPaste : Range -> Ref -> Sheet -> Sheet
+copyPaste from to (Sheet m) =
+    let
+        src =
+            Ref.normalize from
+
+        dCol =
+            to.col - src.start.col
+
+        dRow =
+            to.row - src.start.row
+
+        cells2 =
+            List.foldl
+                (\r acc ->
+                    let
+                        dk =
+                            ( r.col + dCol, r.row + dRow )
+                    in
+                    case Dict.get (key r) m.cells of
+                        Just cell ->
+                            Dict.insert dk (translateCell dCol dRow cell) acc
+
+                        Nothing ->
+                            Dict.remove dk acc
+                )
+                m.cells
+                (Ref.cellsOf src)
+    in
+    Sheet { m | cells = cells2 }
+
+
+{-| Cut the `from` block and paste it with its top-left at `to`. **Move semantics**: the
+cells move verbatim — their own references are *not* shifted (a moved formula keeps
+pointing at the same cells) — and the source is cleared. (References elsewhere that point
+into the moved block are left as-is — a documented simplification.) -}
+cutPaste : Range -> Ref -> Sheet -> Sheet
+cutPaste from to (Sheet m) =
+    let
+        src =
+            Ref.normalize from
+
+        dCol =
+            to.col - src.start.col
+
+        dRow =
+            to.row - src.start.row
+
+        moved =
+            Ref.cellsOf src
+
+        cleared =
+            List.foldl (\r acc -> Dict.remove (key r) acc) m.cells moved
+
+        placed =
+            List.foldl
+                (\r acc ->
+                    let
+                        dk =
+                            ( r.col + dCol, r.row + dRow )
+                    in
+                    case Dict.get (key r) m.cells of
+                        Just cell ->
+                            Dict.insert dk cell acc
+
+                        Nothing ->
+                            Dict.remove dk acc
+                )
+                cleared
+                moved
+    in
+    Sheet { m | cells = placed }
+
+
+{-| Copy a cell to a new position offset by `(dCol, dRow)`, translating a formula's
+relative references; literals are copied verbatim. -}
+translateCell : Int -> Int -> Cell -> Cell
+translateCell dCol dRow cell =
+    case cell.parsed of
+        PFormula expr ->
+            let
+                e2 =
+                    Refactor.translate dCol dRow expr
+            in
+            { cell | parsed = PFormula e2, raw = Render.formula e2, value = VEmpty }
+
+        _ ->
+            cell
+
+
+
+-- AUTOFILL -------------------------------------------------------------------
+
+
+{-| Fill a range downward from its top row: each row below is the top row copied down,
+with relative references shifted (so `=A1*2` becomes `=A2*2`, …). Recalculate afterwards. -}
+fillDown : Range -> Sheet -> Sheet
+fillDown range (Sheet m) =
+    let
+        n =
+            Ref.normalize range
+
+        cells2 =
+            List.foldl
+                (\r acc ->
+                    List.foldl
+                        (\c a -> fillCell m ( c, n.start.row ) ( 0, r - n.start.row ) ( c, r ) a)
+                        acc
+                        (List.range n.start.col n.end.col)
+                )
+                m.cells
+                (List.range (n.start.row + 1) n.end.row)
+    in
+    Sheet { m | cells = cells2 }
+
+
+{-| Fill a range rightward from its leftmost column (relative references shift across). -}
+fillRight : Range -> Sheet -> Sheet
+fillRight range (Sheet m) =
+    let
+        n =
+            Ref.normalize range
+
+        cells2 =
+            List.foldl
+                (\c acc ->
+                    List.foldl
+                        (\r a -> fillCell m ( n.start.col, r ) ( c - n.start.col, 0 ) ( c, r ) a)
+                        acc
+                        (List.range n.start.row n.end.row)
+                )
+                m.cells
+                (List.range (n.start.col + 1) n.end.col)
+    in
+    Sheet { m | cells = cells2 }
+
+
+{-| Copy `srcKey`'s cell to `destKey`, translating a formula by `(dCol, dRow)`; clears the
+destination when the source is empty. -}
+fillCell : Model -> ( Int, Int ) -> ( Int, Int ) -> ( Int, Int ) -> Dict ( Int, Int ) Cell -> Dict ( Int, Int ) Cell
+fillCell m srcKey ( dCol, dRow ) destKey acc =
+    case Dict.get srcKey m.cells of
+        Just cell ->
+            Dict.insert destKey (translateCell dCol dRow cell) acc
+
+        Nothing ->
+            Dict.remove destKey acc
+
+
+{-| Fill a numeric/date **series** vertically over a range: per column, read the leading
+run of numbers as the seed, infer the step from the first two (or 1 for a single seed),
+and write `first + step·i` down the whole column — preserving each cell's number format,
+so a date-formatted column extrapolates as a date series. -}
+fillSeries : Range -> Sheet -> Sheet
+fillSeries range sheet =
+    let
+        n =
+            Ref.normalize range
+    in
+    List.foldl (fillSeriesCol n) sheet (List.range n.start.col n.end.col)
+
+
+fillSeriesCol : Range -> Int -> Sheet -> Sheet
+fillSeriesCol n col sheet =
+    let
+        rows =
+            List.range n.start.row n.end.row
+
+        seeds =
+            leadingNumbers col rows sheet
+    in
+    case seeds of
+        [] ->
+            sheet
+
+        first :: rest ->
+            let
+                step =
+                    case rest of
+                        second :: _ ->
+                            second - first
+
+                        [] ->
+                            1
+            in
+            List.foldl
+                (\( i, r ) acc ->
+                    setRaw { col = col, row = r } (Value.toText (VNumber (first + step * toFloat i))) acc
+                )
+                sheet
+                (List.indexedMap (\i r -> ( i, r )) rows)
+
+
+{-| The leading run of numeric values down a column within the given rows. -}
+leadingNumbers : Int -> List Int -> Sheet -> List Float
+leadingNumbers col rows sheet =
+    case rows of
+        [] ->
+            []
+
+        r :: rest ->
+            case valueAt { col = col, row = r } sheet of
+                VNumber x ->
+                    x :: leadingNumbers col rest sheet
+
+                _ ->
+                    []
+
+
+
+-- SORT & FILTER --------------------------------------------------------------
+
+
+{-| Sort the rows of a range by the values in column `keyCol`, ascending or descending.
+Whole cells (input, format, style) move together; references are not rewritten, so this is
+intended for ranges of data. Recalculate afterwards. -}
+sortRange : Range -> Int -> Bool -> Sheet -> Sheet
+sortRange range keyCol ascending ((Sheet m) as sheet) =
+    let
+        n =
+            Ref.normalize range
+
+        rows =
+            List.range n.start.row n.end.row
+
+        cols =
+            List.range n.start.col n.end.col
+
+        rowData =
+            List.map
+                (\r ->
+                    { sortKey = valueAt { col = keyCol, row = r } sheet
+                    , cells = List.filterMap (\c -> Maybe.map (\cell -> ( c, cell )) (Dict.get ( c, r ) m.cells)) cols
+                    }
+                )
+                rows
+
+        sorted =
+            List.sortWith
+                (\a b ->
+                    let
+                        o =
+                            Value.compare a.sortKey b.sortKey
+                    in
+                    if ascending then
+                        o
+
+                    else
+                        flipOrder o
+                )
+                rowData
+
+        cleared =
+            List.foldl (\r acc -> List.foldl (\c a -> Dict.remove ( c, r ) a) acc cols) m.cells rows
+
+        placed =
+            List.foldl
+                (\( r, rd ) acc -> List.foldl (\( c, cell ) a -> Dict.insert ( c, r ) cell a) acc rd.cells)
+                cleared
+                (List.map2 (\r rd -> ( r, rd )) rows sorted)
+    in
+    Sheet { m | cells = placed }
+
+
+flipOrder : Order -> Order
+flipOrder o =
+    case o of
+        LT ->
+            GT
+
+        EQ ->
+            EQ
+
+        GT ->
+            LT
+
+
+{-| The rows of a range whose key-column value satisfies `pred` — the rest are the ones a
+view would hide. Returns absolute row indices, top to bottom. -}
+filterRows : Range -> Int -> (Value -> Bool) -> Sheet -> List Int
+filterRows range keyCol pred sheet =
+    let
+        n =
+            Ref.normalize range
+    in
+    List.filter (\r -> pred (valueAt { col = keyCol, row = r } sheet))
+        (List.range n.start.row n.end.row)
+
+
+
+-- NAMED RANGES ---------------------------------------------------------------
+
+
+{-| Define (or redefine) a name for a cell/range. Names are case-insensitive and usable in
+any formula, e.g. `defineName "TaxRate" (range "B1") sheet` then `=Price*TaxRate`. -}
+defineName : String -> Range -> Sheet -> Sheet
+defineName name range (Sheet m) =
+    Sheet { m | names = Dict.insert (String.toUpper name) (Ref.normalize range) m.names }
+
+
+{-| Remove a defined name. -}
+clearName : String -> Sheet -> Sheet
+clearName name (Sheet m) =
+    Sheet { m | names = Dict.remove (String.toUpper name) m.names }
+
+
+{-| Look up the range a name resolves to. -}
+nameOf : String -> Sheet -> Maybe Range
+nameOf name (Sheet m) =
+    Dict.get (String.toUpper name) m.names
+
+
+{-| Every defined name with its range. -}
+definedNames : Sheet -> List ( String, Range )
+definedNames (Sheet m) =
+    Dict.toList m.names
 
 
 

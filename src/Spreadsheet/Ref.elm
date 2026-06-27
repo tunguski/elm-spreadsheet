@@ -1,10 +1,14 @@
 module Spreadsheet.Ref exposing
     ( Ref
     , Range
+    , Abs
+    , absNone
     , colToString
     , colFromString
     , toA1
+    , toA1Abs
     , fromA1
+    , fromA1Abs
     , rangeToA1
     , rangeFromA1
     , normalize
@@ -39,6 +43,20 @@ normalised — use `normalize` to get start ≤ end on both axes.
 -}
 type alias Range =
     { start : Ref, end : Ref }
+
+
+{-| Which axes of a reference are absolute (pinned with `$`). `col`/`row` true means the
+`$A` / `A$1` marker was present — such coordinates do *not* shift when a formula is copied
+or filled. Structural inserts/deletes shift even absolute refs.
+-}
+type alias Abs =
+    { col : Bool, row : Bool }
+
+
+{-| A fully relative reference (no `$`). -}
+absNone : Abs
+absNone =
+    { col = False, row = False }
 
 
 {-| Spreadsheet column label for a 0-based index: `0 → "A"`, `25 → "Z"`, `26 → "AA"`. -}
@@ -102,6 +120,53 @@ colFromString s =
 toA1 : Ref -> String
 toA1 ref =
     colToString ref.col ++ String.fromInt (ref.row + 1)
+
+
+{-| Render a ref with `$` markers per its `Abs` flags, e.g. `$A$1`, `A$1`. -}
+toA1Abs : Abs -> Ref -> String
+toA1Abs abs ref =
+    (if abs.col then
+        "$"
+
+     else
+        ""
+    )
+        ++ colToString ref.col
+        ++ (if abs.row then
+                "$"
+
+            else
+                ""
+           )
+        ++ String.fromInt (ref.row + 1)
+
+
+{-| Parse an A1 string into both its `Ref` and its `$`-absoluteness flags. `$A$1` →
+both absolute, `A$1` → row only, `$A1` → col only. -}
+fromA1Abs : String -> Maybe ( Ref, Abs )
+fromA1Abs raw =
+    let
+        s =
+            String.trim raw
+
+        colAbs =
+            String.startsWith "$" s
+
+        afterCol =
+            if colAbs then
+                String.dropLeft 1 s
+
+            else
+                s
+
+        letters =
+            takeWhileAlpha (String.toList afterCol)
+
+        rowAbs =
+            String.startsWith "$" (String.dropLeft (List.length letters) afterCol)
+    in
+    fromA1 s
+        |> Maybe.map (\ref -> ( ref, { col = colAbs, row = rowAbs } ))
 
 
 {-| Parse an A1 string into a `Ref`. Tolerates `$` markers (`$A$1`). -}

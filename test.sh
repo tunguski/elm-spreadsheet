@@ -18,4 +18,5 @@ $ELM test "$P/test/SpreadsheetTest.elm" \
   "$P/src/Spreadsheet/Value.elm" "$P/src/Spreadsheet/Ref.elm" "$P/src/Spreadsheet/Ast.elm" \
   "$P/src/Spreadsheet/Parser.elm" "$P/src/Spreadsheet/Functions.elm" "$P/src/Spreadsheet/Format.elm" \
   "$P/src/Spreadsheet/Eval.elm" "$P/src/Spreadsheet/Deps.elm" "$P/src/Spreadsheet/Style.elm" \
-  "$P/src/Spreadsheet/Sheet.elm" "$P/src/Spreadsheet/Recalc.elm"
+  "$P/src/Spreadsheet/Render.elm" "$P/src/Spreadsheet/Refactor.elm" \
+  "$P/src/Spreadsheet/Sheet.elm" "$P/src/Spreadsheet/Recalc.elm" "$P/src/Spreadsheet/Csv.elm"

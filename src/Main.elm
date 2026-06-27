@@ -76,6 +76,8 @@ type alias Example =
     , recalc : Recalc.State
     , status : String
     , toolbar : Bool
+    , editTools : Bool
+    , dataRange : Ref.Range
     , wrapClass : String
     , css : Maybe String
     }
@@ -91,6 +93,7 @@ init _ =
             , exConditional
             , exStyling
             , exFormatting
+            , exEdit
             , exAsync
             ]
       , drag = Nothing
@@ -126,6 +129,12 @@ type Msg
     | FmtBackground Int String
     | FmtFont Int String
     | FmtSize Int String
+      -- structural-edit toolbar (acts on the example's selected cell)
+    | InsertRow Int
+    | DeleteRow Int
+    | InsertCol Int
+    | DeleteCol Int
+    | SortCol Int Bool
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -215,6 +224,21 @@ update msg model =
             , Cmd.none
             )
 
+        InsertRow id ->
+            ( mapExample id (structuralEdit (\e -> Sheet.insertRows e.selected.row 1 e.sheet)) model, focusGrid id )
+
+        DeleteRow id ->
+            ( mapExample id (structuralEdit (\e -> Sheet.deleteRows e.selected.row 1 e.sheet)) model, focusGrid id )
+
+        InsertCol id ->
+            ( mapExample id (structuralEdit (\e -> Sheet.insertCols e.selected.col 1 e.sheet)) model, focusGrid id )
+
+        DeleteCol id ->
+            ( mapExample id (structuralEdit (\e -> Sheet.deleteCols e.selected.col 1 e.sheet)) model, focusGrid id )
+
+        SortCol id ascending ->
+            ( mapExample id (structuralEdit (\e -> Sheet.sortRange e.dataRange e.selected.col ascending e.sheet)) model, focusGrid id )
+
         Frame _ ->
             ( { model | examples = List.map stepExample model.examples }, Cmd.none )
 
@@ -244,6 +268,28 @@ restyle id f model =
             { e | sheet = Sheet.setStyle e.selected (f (Sheet.baseStyleAt e.selected e.sheet)) e.sheet }
         )
         model
+
+
+{-| Apply a structural edit (insert/delete/sort), recompute the whole sheet, and keep the
+selection in range. These changes ripple across many cells, so a full recalc is simplest
+and these example sheets are tiny. -}
+structuralEdit : (Example -> Sheet) -> Example -> Example
+structuralEdit f e =
+    let
+        sheet2 =
+            Sheet.recalcAll (f e)
+
+        ( rows, cols ) =
+            Sheet.dims sheet2
+    in
+    { e
+        | sheet = sheet2
+        , editing = Nothing
+        , selected =
+            { col = clamp 0 (cols - 1) e.selected.col
+            , row = clamp 0 (rows - 1) e.selected.row
+            }
+    }
 
 
 {-| Commit the in-progress edit (if any) and recalculate. -}
@@ -508,6 +554,8 @@ example id title blurb cols rows sheet =
     , recalc = Recalc.idle
     , status = ""
     , toolbar = False
+    , editTools = False
+    , dataRange = { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } }
     , wrapClass = ""
     , css = Nothing
     }
@@ -710,10 +758,39 @@ formattingSheet =
         |> Sheet.recalcAll
 
 
-{-| 8 — async, visible-first recalculation of a large sheet. -}
+{-| 8 — structural editing: insert/delete rows & columns (formulas auto-rewrite) and sort. -}
+exEdit : Example
+exEdit =
+    let
+        e =
+            example 8
+                "Edit structure: insert, delete & sort"
+                "Select a cell, then use the toolbar. Insert or delete a row/column and every formula rewrites itself — the Total column’s SUM ranges grow, shrink, and a reference into a deleted cell becomes #REF!, just like Excel. Sort ↑/↓ reorders the three expense rows by the selected column, carrying each whole row. (The library also does copy/paste with relative-reference translation, autofill & series, named ranges and CSV — all covered by the test suite.)"
+                5
+                6
+                editSheet
+    in
+    { e | editTools = True, selected = ref "E2", dataRange = rangeOf "A2" "D4" }
+
+
+editSheet : Sheet
+editSheet =
+    build 10 6
+        [ ( "A1", "Item" ), ( "B1", "Jan" ), ( "C1", "Feb" ), ( "D1", "Mar" ), ( "E1", "Total" )
+        , ( "A2", "Rent" ), ( "B2", "1200" ), ( "C2", "1200" ), ( "D2", "1200" ), ( "E2", "=SUM(B2:D2)" )
+        , ( "A3", "Food" ), ( "B3", "400" ), ( "C3", "450" ), ( "D3", "420" ), ( "E3", "=SUM(B3:D3)" )
+        , ( "A4", "Travel" ), ( "B4", "200" ), ( "C4", "0" ), ( "D4", "300" ), ( "E4", "=SUM(B4:D4)" )
+        , ( "A5", "Total" ), ( "B5", "=SUM(B2:B4)" ), ( "C5", "=SUM(C2:C4)" ), ( "D5", "=SUM(D2:D4)" ), ( "E5", "=SUM(E2:E4)" )
+        ]
+        |> withStyle (cells "A1" "E1") (\s -> { s | bold = True })
+        |> withStyle (cells "A5" "E5") (\s -> { s | bold = True })
+        |> Sheet.recalcAll
+
+
+{-| 9 — async, visible-first recalculation of a large sheet. -}
 exAsync : Example
 exAsync =
-    { id = 8
+    { id = 9
     , title = "Big sheets without freezing (async)"
     , blurb = "Click “Load” to fill ~2,400 chained formulas (a running sum and two derived columns down 800 rows) — then scroll through them. The grid is a viewport: only the ~20 rows on screen are ever in the DOM (the rest are spacer-backed), and the engine recalculates in small batches across animation frames, doing the visible rows first. So an 800-row sheet stays responsive and the on-screen region settles immediately."
     , sheet =
@@ -731,6 +808,8 @@ exAsync =
     , recalc = Recalc.idle
     , status = "Idle — nothing loaded yet."
     , toolbar = False
+    , editTools = False
+    , dataRange = { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } }
     , wrapClass = ""
     , css = Nothing
     }
@@ -808,6 +887,11 @@ exampleView e =
               ]
             , if e.toolbar then
                 [ formattingToolbar e ]
+
+              else
+                []
+            , if e.editTools then
+                [ editToolbar e ]
 
               else
                 []
@@ -893,6 +977,26 @@ formattingToolbar e =
             , input [ HA.type_ "color", HA.value (Maybe.withDefault "#ffffff" (Style.backgroundOf cur)), HE.onInput (FmtBackground e.id) ] []
             ]
         ]
+
+
+{-| The structural-edit toolbar, acting on the example's selected cell. -}
+editToolbar : Example -> Html Msg
+editToolbar e =
+    div [ HA.class "fmt-toolbar" ]
+        [ span [ HA.class "fmt-cell" ] [ text (Ref.toA1 e.selected) ]
+        , editBtn (InsertRow e.id) "＋ Row"
+        , editBtn (DeleteRow e.id) "－ Row"
+        , editBtn (InsertCol e.id) "＋ Col"
+        , editBtn (DeleteCol e.id) "－ Col"
+        , span [ HA.class "fmt-sep" ] []
+        , editBtn (SortCol e.id True) "Sort ↑"
+        , editBtn (SortCol e.id False) "Sort ↓"
+        ]
+
+
+editBtn : Msg -> String -> Html Msg
+editBtn msg lbl =
+    button [ HA.class "ebtn", HE.onClick msg ] [ text lbl ]
 
 
 fmtBtn : Bool -> Msg -> String -> String -> Html Msg

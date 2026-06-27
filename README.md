@@ -35,6 +35,18 @@ engine is pure and effect-free, so it is fully unit-tested without a browser.
   and moves down (**Shift+Enter** up), **Tab** commits and moves right (**Shift+Tab** left),
   **Esc** cancels, and **Backspace/Delete** clears. Columns are resized by dragging the
   border on a column header.
+- **Absolute & relative references.** `$A$1`, `$A1`, `A$1` are parsed, evaluated, displayed
+  and honoured by copy/fill — the basis for spreadsheet-correct reference behaviour.
+- **Structural editing.** Insert or delete whole rows and columns and every formula rewrites
+  itself: references shift, ranges grow or shrink, and a reference into a deleted cell
+  becomes `#REF!`. Conditional-format ranges, colour scales, data bars, named ranges and
+  column widths all move with the change.
+- **Clipboard & autofill.** Copy/paste with relative-reference translation (`=A1+$B$1`
+  pasted a row down becomes `=A2+$B$1`), a verbatim cut/paste move, fill-down/right, and
+  numeric/date **series** extrapolation.
+- **Named ranges, sort & filter, CSV.** Define a name for a cell or range and use it in any
+  formula (`=Price*TaxRate`); sort a data range by a key column (whole rows move) or query
+  the rows a filter would keep; import and export rectangular ranges as RFC-4180-style CSV.
 - **Sync *and* async recalculation.** `recalcAll`/`recalcFrom` recompute synchronously in
   dependency order (with circular-reference detection → `#CIRC!`). For very large sheets,
   `Spreadsheet.Recalc` slices the same work into per-frame **batches** and computes the
@@ -53,12 +65,16 @@ src/Spreadsheet/
   Deps.elm       precedent extraction + topological sort
   Format.elm     number/date formatting + format-code interpreter
   Style.elm      cell styles, conditional rules, colour scales, data bars
-  Sheet.elm      the (opaque) sheet model + synchronous recalc engine
+  Render.elm     serialize a formula syntax tree back to text
+  Refactor.elm   rewrite references for copy/fill and insert/delete row/col
+  Sheet.elm      the (opaque) sheet model + sync recalc, structural edits,
+                 clipboard, autofill, sort/filter, named ranges
   Recalc.elm     async, visible-first incremental recalculation
+  Csv.elm        CSV import/export
   View.elm       the class-styled HTML grid
 src/Main.elm     a demo app (editing, formula bar, sync/async toggle)
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   362 tests
+test/SpreadsheetTest.elm   227 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -109,7 +125,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 362 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 227 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
@@ -122,5 +138,10 @@ ELM=../../elm.sh ./test.sh     # → 362 pure-engine tests
   February 1900.
 - A bare range used where a single value is expected collapses to its top-left cell
   (rather than spilling/array-broadcasting).
+- `sortRange` moves cells verbatim and does **not** rewrite references, so it is intended
+  for ranges of data; keep formula columns outside the sorted range (the demo sorts the
+  data columns and lets the stationary `SUM` column recompute).
+- `cutPaste` moves cells verbatim and clears the source, but does not update references
+  elsewhere that pointed into the moved block.
 - `SUBSTITUTE`'s optional instance argument and a few other deep Excel corners are
   documented simplifications.

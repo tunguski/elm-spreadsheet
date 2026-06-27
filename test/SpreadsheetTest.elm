@@ -20,12 +20,16 @@ import Dict exposing (Dict)
 import Expect
 import Fuzz
 import Set
+import Spreadsheet.Ast exposing (Expr)
+import Spreadsheet.Csv as Csv
 import Spreadsheet.Deps as Deps
 import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format
 import Spreadsheet.Parser as Parser
 import Spreadsheet.Recalc as Recalc
-import Spreadsheet.Ref as Ref exposing (Ref)
+import Spreadsheet.Ref as Ref exposing (Range, Ref)
+import Spreadsheet.Refactor as Refactor
+import Spreadsheet.Render as Render
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 import Spreadsheet.Style as Style
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
@@ -53,6 +57,15 @@ suite =
         , depsTests
         , recalcTests
         , asyncTests
+        , absRefTests
+        , renderTests
+        , refactorTests
+        , structuralTests
+        , clipboardTests
+        , fillTests
+        , sortFilterTests
+        , nameTests
+        , csvTests
         ]
 
 
@@ -75,6 +88,7 @@ ctxFrom pairs =
     in
     { lookup = \ref -> Maybe.withDefault VEmpty (Dict.get ( ref.col, ref.row ) d)
     , self = { col = 0, row = 0 }
+    , names = \_ -> Nothing
     }
 
 
@@ -851,3 +865,372 @@ sameValues a b addresses =
             Sheet.valueAt (at addr) a == Sheet.valueAt (at addr) b
         )
         addresses
+
+
+
+-- NEW-FEATURE HELPERS --------------------------------------------------------
+
+
+{-| A range from an `A1:B2`-style string (defaults to A1 on parse failure). -}
+rng : String -> Range
+rng a =
+    Maybe.withDefault { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } } (Ref.rangeFromA1 a)
+
+
+rawOf : String -> Sheet -> String
+rawOf a1 s =
+    Sheet.rawAt (at a1) s
+
+
+{-| Parse a formula body and render it back — exercises the parser ⇄ serializer pair. -}
+reformat : String -> String
+reformat src =
+    case Parser.parse src of
+        Ok e ->
+            Render.expr e
+
+        Err msg ->
+            "ERR:" ++ msg
+
+
+{-| Parse a formula body, apply an `Expr` transform, render the result. -}
+rewrite : (Expr -> Expr) -> String -> String
+rewrite f src =
+    case Parser.parse src of
+        Ok e ->
+            Render.expr (f e)
+
+        Err msg ->
+            "ERR:" ++ msg
+
+
+
+-- ABSOLUTE / RELATIVE REFERENCES ---------------------------------------------
+
+
+absRefTests : Test
+absRefTests =
+    describe "absolute references"
+        [ test "fromA1Abs reads $ markers on both axes" <|
+            \_ -> Expect.equal (Just ( { col = 2, row = 4 }, { col = True, row = True } )) (Ref.fromA1Abs "$C$5")
+        , test "fromA1Abs reads a row-only anchor" <|
+            \_ -> Expect.equal (Just ( { col = 2, row = 4 }, { col = False, row = True } )) (Ref.fromA1Abs "C$5")
+        , test "fromA1Abs reads a relative ref" <|
+            \_ -> Expect.equal (Just ( { col = 2, row = 4 }, { col = False, row = False } )) (Ref.fromA1Abs "C5")
+        , test "toA1Abs renders the markers" <|
+            \_ -> Expect.equal "$C5" (Ref.toA1Abs { col = True, row = False } { col = 2, row = 4 })
+        , test "a fully-absolute ref evaluates like a relative one" <|
+            \_ -> expectVal (VNumber 5) (ev [ ( "A1", VNumber 5 ) ] "=$A$1")
+        , test "absolute markers survive a parse/serialize round-trip" <|
+            \_ -> Expect.equal "$A$1+B$2-$C3" (reformat "$A$1+B$2-$C3")
+        ]
+
+
+
+-- FORMULA SERIALIZATION ------------------------------------------------------
+
+
+renderTests : Test
+renderTests =
+    describe "formula serialization"
+        [ test "round-trips without spurious parens" <|
+            \_ -> Expect.equal "A1+B1*2" (reformat "A1+B1*2")
+        , test "keeps necessary parens" <|
+            \_ -> Expect.equal "(A1+B1)*2" (reformat "(A1+B1)*2")
+        , test "unary minus binds tighter than power" <|
+            \_ -> Expect.equal "-2^2" (reformat "-2^2")
+        , test "power is right associative" <|
+            \_ -> Expect.equal "2^2^3" (reformat "2^2^3")
+        , test "subtraction keeps left-grouping" <|
+            \_ -> Expect.equal "A1-(B1-C1)" (reformat "A1-(B1-C1)")
+        , test "function calls and ranges" <|
+            \_ -> Expect.equal "SUM(A1:A3,B1)" (reformat "SUM(A1:A3, B1)")
+        , test "string literals re-quote" <|
+            \_ -> Expect.equal "CONCAT(\"a\",\"b\")" (reformat "CONCAT(\"a\",\"b\")")
+        , test "percent postfix" <|
+            \_ -> Expect.equal "A1*50%" (reformat "A1*50%")
+        ]
+
+
+
+-- REFERENCE REWRITING --------------------------------------------------------
+
+
+refactorTests : Test
+refactorTests =
+    describe "reference rewriting"
+        [ test "translate shifts relative refs but pins absolute ones" <|
+            \_ -> Expect.equal "B2+$B$1" (rewrite (Refactor.translate 1 1) "A1+$B$1")
+        , test "translate off the top-left edge yields #REF!" <|
+            \_ -> Expect.equal "#REF!" (rewrite (Refactor.translate -1 0) "A1")
+        , test "insertCols shifts refs at/after the insert point" <|
+            \_ -> Expect.equal "C1" (rewrite (Refactor.insertCols 0 1) "B1")
+        , test "insertCols shifts even absolute refs" <|
+            \_ -> Expect.equal "$C$1" (rewrite (Refactor.insertCols 0 1) "$B$1")
+        , test "deleteCols turns a deleted ref into #REF!" <|
+            \_ -> Expect.equal "#REF!" (rewrite (Refactor.deleteCols 1 1) "B1")
+        , test "deleteCols shifts refs past the deleted band" <|
+            \_ -> Expect.equal "B1" (rewrite (Refactor.deleteCols 1 1) "C1")
+        , test "insertRows expands a range spanning the insert" <|
+            \_ -> Expect.equal "SUM(A1:A4)" (rewrite (Refactor.insertRows 1 1) "SUM(A1:A3)")
+        , test "deleteRows shrinks a range overlapping the deletion" <|
+            \_ -> Expect.equal "SUM(A1:A2)" (rewrite (Refactor.deleteRows 2 1) "SUM(A1:A3)")
+        ]
+
+
+
+-- STRUCTURAL EDITS -----------------------------------------------------------
+
+
+structuralTests : Test
+structuralTests =
+    describe "insert/delete rows & columns"
+        [ test "insertRows shifts a formula and its precedents" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "=A1+A2" ) ]
+                            |> Sheet.insertRows 0 1
+                            |> Sheet.recalcAll
+                in
+                Expect.equal ( "=A2+A3", normVal (VNumber 3) ) ( rawOf "A4" s, normVal (valOf "A4" s) )
+        , test "deleteRows makes a reference to a deleted cell #REF!" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "=A1+1" ) ]
+                            |> Sheet.deleteRows 0 1
+                            |> Sheet.recalcAll
+                in
+                expectVal (VError RefErr) (valOf "A1" s)
+        , test "insertCols shifts columns and rewrites formulas" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "10" ), ( "B1", "=A1*2" ) ]
+                            |> Sheet.insertCols 0 1
+                            |> Sheet.recalcAll
+                in
+                Expect.equal ( "=B1*2", normVal (VNumber 20) ) ( rawOf "C1" s, normVal (valOf "C1" s) )
+        , test "deleteCols shifts a surviving reference" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "C1", "5" ), ( "D1", "=C1+1" ) ]
+                            |> Sheet.deleteCols 1 1
+                            |> Sheet.recalcAll
+                in
+                Expect.equal ( "=B1+1", normVal (VNumber 6) ) ( rawOf "C1" s, normVal (valOf "C1" s) )
+        ]
+
+
+
+-- CLIPBOARD ------------------------------------------------------------------
+
+
+clipboardTests : Test
+clipboardTests =
+    describe "copy / cut / paste"
+        [ test "copyPaste translates relative references" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=B1" ), ( "B1", "10" ), ( "B2", "20" ) ]
+                            |> Sheet.copyPaste (rng "A1") (at "A2")
+                            |> Sheet.recalcAll
+                in
+                Expect.equal ( "=B2", normVal (VNumber 20) ) ( rawOf "A2" s, normVal (valOf "A2" s) )
+        , test "copyPaste keeps absolute references pinned" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=$B$1" ), ( "B1", "10" ) ]
+                            |> Sheet.copyPaste (rng "A1") (at "A5")
+                            |> Sheet.recalcAll
+                in
+                Expect.equal ( "=$B$1", normVal (VNumber 10) ) ( rawOf "A5" s, normVal (valOf "A5" s) )
+        , test "cutPaste moves a cell verbatim and clears the source" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "5" ) ]
+                            |> Sheet.cutPaste (rng "A1") (at "C3")
+                in
+                expectVal2 ( VEmpty, VNumber 5 ) ( valOf "A1" s, valOf "C3" s )
+        ]
+
+
+
+-- AUTOFILL -------------------------------------------------------------------
+
+
+fillTests : Test
+fillTests =
+    describe "autofill"
+        [ test "fillDown copies a formula with shifting refs" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "B1", "=A1*10" ) ]
+                            |> Sheet.fillDown (rng "B1:B3")
+                            |> Sheet.recalcAll
+                in
+                expectVal2 ( VNumber 20, VNumber 30 ) ( valOf "B2" s, valOf "B3" s )
+        , test "fillRight copies across columns" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "2" ), ( "B1", "3" ), ( "C1", "4" ), ( "A2", "=A1*10" ) ]
+                            |> Sheet.fillRight (rng "A2:C2")
+                            |> Sheet.recalcAll
+                in
+                expectVal2 ( VNumber 30, VNumber 40 ) ( valOf "B2" s, valOf "C2" s )
+        , test "fillSeries extrapolates a linear series from two seeds" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ) ]
+                            |> Sheet.fillSeries (rng "A1:A5")
+                in
+                expectVal2 ( VNumber 4, VNumber 5 ) ( valOf "A4" s, valOf "A5" s )
+        , test "fillSeries steps by 1 from a single seed" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "5" ) ]
+                            |> Sheet.fillSeries (rng "A1:A3")
+                in
+                expectVal2 ( VNumber 6, VNumber 7 ) ( valOf "A2" s, valOf "A3" s )
+        ]
+
+
+
+-- SORT & FILTER --------------------------------------------------------------
+
+
+sortFilterTests : Test
+sortFilterTests =
+    describe "sort & filter"
+        [ test "sortRange orders rows ascending by a key column" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "3" ), ( "A2", "1" ), ( "A3", "2" ) ]
+                            |> Sheet.sortRange (rng "A1:A3") 0 True
+                in
+                Expect.equal (List.map normVal [ VNumber 1, VNumber 2, VNumber 3 ])
+                    (List.map (\a -> normVal (valOf a s)) [ "A1", "A2", "A3" ])
+        , test "sortRange carries the whole row" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "3" ), ( "B1", "c" ), ( "A2", "1" ), ( "B2", "a" ), ( "A3", "2" ), ( "B3", "b" ) ]
+                            |> Sheet.sortRange (rng "A1:B3") 0 True
+                in
+                Expect.equal [ VText "a", VText "b", VText "c" ]
+                    (List.map (\a -> valOf a s) [ "B1", "B2", "B3" ])
+        , test "sortRange descending" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "3" ), ( "A3", "2" ) ]
+                            |> Sheet.sortRange (rng "A1:A3") 0 False
+                in
+                Expect.equal (List.map normVal [ VNumber 3, VNumber 2, VNumber 1 ])
+                    (List.map (\a -> normVal (valOf a s)) [ "A1", "A2", "A3" ])
+        , test "filterRows returns the matching rows" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "10" ), ( "A2", "5" ), ( "A3", "20" ), ( "A4", "5" ) ]
+
+                    atLeast10 v =
+                        Value.compare v (VNumber 10) /= LT
+                in
+                Expect.equal [ 0, 2 ] (Sheet.filterRows (rng "A1:A4") 0 atLeast10 s)
+        ]
+
+
+
+-- NAMED RANGES ---------------------------------------------------------------
+
+
+nameTests : Test
+nameTests =
+    describe "named ranges"
+        [ test "a name resolves to a single cell in a formula" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 50 10
+                            |> Sheet.setRawMany [ ( at "B1", "0.2" ), ( at "A1", "=100*TAX" ) ]
+                            |> Sheet.defineName "TAX" (rng "B1")
+                            |> Sheet.recalcAll
+                in
+                expectVal (VNumber 20) (valOf "A1" s)
+        , test "a name resolves to a range inside an aggregate" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 50 10
+                            |> Sheet.setRawMany [ ( at "A1", "1" ), ( at "A2", "2" ), ( at "A3", "3" ), ( at "B1", "=SUM(DATA)" ) ]
+                            |> Sheet.defineName "DATA" (rng "A1:A3")
+                            |> Sheet.recalcAll
+                in
+                expectVal (VNumber 6) (valOf "B1" s)
+        , test "an undefined name is #NAME?" <|
+            \_ -> expectVal (VError NameErr) (valOf "A1" (sheetWith [ ( "A1", "=NOPE" ) ]))
+        , test "editing a named cell updates dependents (name tracked as a precedent)" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 50 10
+                            |> Sheet.setRawMany [ ( at "B1", "10" ), ( at "A1", "=RATE*2" ) ]
+                            |> Sheet.defineName "RATE" (rng "B1")
+                            |> Sheet.recalcAll
+                            |> Sheet.setRaw (at "B1") "20"
+                            |> Sheet.recalcFrom [ at "B1" ]
+                in
+                expectVal (VNumber 40) (valOf "A1" s)
+        ]
+
+
+
+-- CSV ------------------------------------------------------------------------
+
+
+csvTests : Test
+csvTests =
+    describe "CSV import/export"
+        [ test "encode quotes fields containing a comma" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "x,y" ), ( "B2", "3" ) ]
+                in
+                Expect.equal "1,2\n\"x,y\",3" (Csv.encode (rng "A1:B2") s)
+        , test "parse splits quoted fields and rows" <|
+            \_ -> Expect.equal [ [ "a,b", "c" ], [ "d" ] ] (Csv.parse "\"a,b\",c\nd")
+        , test "parse unescapes doubled quotes" <|
+            \_ -> Expect.equal [ [ "a\"b" ] ] (Csv.parse "\"a\"\"b\"")
+        , test "decode lands values at the anchor and types them" <|
+            \_ ->
+                let
+                    s =
+                        Csv.decode (at "A1") "10,20\n30,40" (Sheet.empty 10 10)
+                            |> Sheet.recalcAll
+                in
+                Expect.equal (List.map normVal [ VNumber 10, VNumber 20, VNumber 30, VNumber 40 ])
+                    (List.map (\a -> normVal (valOf a s)) [ "A1", "B1", "A2", "B2" ])
+        , test "round-trips a numeric block" <|
+            \_ ->
+                let
+                    original =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "3" ), ( "B2", "4" ) ]
+
+                    restored =
+                        Csv.decode (at "A1") (Csv.encode (rng "A1:B2") original) (Sheet.empty 10 10)
+                            |> Sheet.recalcAll
+                in
+                Expect.equal True (sameValues original restored [ "A1", "B1", "A2", "B2" ])
+        ]

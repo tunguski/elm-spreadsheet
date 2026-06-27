@@ -15,15 +15,21 @@ extraction (`Spreadsheet.Deps`) walks it collecting every `RefE`/`RangeE`.
 
 -}
 
-import Spreadsheet.Ref exposing (Range, Ref)
+import Spreadsheet.Ref exposing (Abs, Range, Ref)
 import Spreadsheet.Value exposing (Value)
 
 
-{-| A formula expression. -}
+{-| A formula expression.
+
+`RefE`/`RangeE` carry their `$`-absoluteness flags alongside the resolved coordinates, so
+copy/fill can shift only the relative parts and the serializer can reproduce the `$`
+markers. `NameE` is a defined-name reference (e.g. `TaxRate`) resolved against the sheet's
+name table at evaluation time. -}
 type Expr
     = Lit Value
-    | RefE Ref
-    | RangeE Range
+    | RefE Ref Abs
+    | RangeE Range Abs Abs
+    | NameE String
     | Unary UnaryOp Expr
     | Binary BinaryOp Expr Expr
     | Func String (List Expr)

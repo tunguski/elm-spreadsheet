@@ -268,6 +268,30 @@ body {
     color: #fff;
 }
 
+.ebtn {
+    font: inherit;
+    font-size: 13px;
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--ss-border);
+    border-radius: 6px;
+    background: #fff;
+    color: #3c4043;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ebtn:hover {
+    background: #eef1f6;
+}
+
+.fmt-sep {
+    width: 1px;
+    align-self: stretch;
+    margin: 2px 4px;
+    background: var(--ss-border);
+}
+
 .fmt-b {
     font-weight: 800;
 }

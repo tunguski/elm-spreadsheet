@@ -24,14 +24,16 @@ import Spreadsheet.Ast exposing (BinaryOp(..), Expr(..), UnaryOp(..))
 import Spreadsheet.Format as Format
 import Spreadsheet.Functions as Functions exposing (Arg(..))
 import Spreadsheet.Parser as Parser
-import Spreadsheet.Ref as Ref exposing (Ref)
+import Spreadsheet.Ref as Ref exposing (Range, Ref)
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
 
 
-{-| What the evaluator needs from the sheet. -}
+{-| What the evaluator needs from the sheet: read another cell's value (`lookup`), know
+which cell is being computed (`self`), and resolve a defined name to its range (`names`). -}
 type alias Context =
     { lookup : Ref -> Value
     , self : Ref
+    , names : String -> Maybe Range
     }
 
 
@@ -54,17 +56,23 @@ eval ctx expr =
         Lit v ->
             v
 
-        RefE ref ->
+        RefE ref _ ->
             ctx.lookup ref
 
-        RangeE range ->
-            -- A bare range in scalar position collapses to its top-left cell.
-            case Ref.cellsOf range of
-                first :: _ ->
-                    ctx.lookup first
+        RangeE range _ _ ->
+            scalarOfRange ctx range
 
-                [] ->
-                    VError RefErr
+        NameE name ->
+            case ctx.names name of
+                Just range ->
+                    if range.start == range.end then
+                        ctx.lookup range.start
+
+                    else
+                        scalarOfRange ctx range
+
+                Nothing ->
+                    VError NameErr
 
         Unary op sub ->
             applyUnary op (eval ctx sub)
@@ -74,6 +82,17 @@ eval ctx expr =
 
         Func name args ->
             evalFunc ctx name args
+
+
+{-| A range used where a scalar is expected collapses to its top-left cell. -}
+scalarOfRange : Context -> Range -> Value
+scalarOfRange ctx range =
+    case Ref.cellsOf range of
+        first :: _ ->
+            ctx.lookup first
+
+        [] ->
+            VError RefErr
 
 
 evalFunc : Context -> String -> List Expr -> Value
@@ -118,12 +137,24 @@ INDEX/VLOOKUP/MATCH and the range-aware aggregates get the rectangle they need. 
 evalArg : Context -> Expr -> Arg
 evalArg ctx expr =
     case expr of
-        RangeE range ->
-            Matrix
-                (List.map (List.map ctx.lookup) (Ref.rowsOf range))
+        RangeE range _ _ ->
+            matrixOf ctx range
+
+        NameE name ->
+            case ctx.names name of
+                Just range ->
+                    matrixOf ctx range
+
+                Nothing ->
+                    Scalar (VError NameErr)
 
         _ ->
             Scalar (eval ctx expr)
+
+
+matrixOf : Context -> Range -> Arg
+matrixOf ctx range =
+    Matrix (List.map (List.map ctx.lookup) (Ref.rowsOf range))
 
 
 
@@ -249,10 +280,10 @@ evalText ctx args =
 refRowCol : (Ref -> Int) -> Context -> List Expr -> Int
 refRowCol field ctx args =
     case args of
-        (RefE ref) :: _ ->
+        (RefE ref _) :: _ ->
             field ref
 
-        (RangeE range) :: _ ->
+        (RangeE range _ _) :: _ ->
             field (Ref.normalize range).start
 
         _ ->

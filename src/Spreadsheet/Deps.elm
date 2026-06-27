@@ -1,5 +1,6 @@
 module Spreadsheet.Deps exposing
     ( precedents
+    , precedentsWith
     , topoSort
     )
 
@@ -21,32 +22,43 @@ import Spreadsheet.Ref as Ref exposing (Ref)
 
 
 {-| Every cell address an expression references, as `(col, row)` keys. Ranges are
-expanded to all their member cells. -}
+expanded to all their member cells. Defined names contribute nothing (use
+`precedentsWith` to resolve them). -}
 precedents : Expr -> List ( Int, Int )
 precedents expr =
-    precedentsHelp expr []
+    precedentsWith (\_ -> []) expr
 
 
-precedentsHelp : Expr -> List ( Int, Int ) -> List ( Int, Int )
-precedentsHelp expr acc =
+{-| Like `precedents`, but a resolver maps each defined name to the cell keys it stands
+for, so a formula referencing a named range still depends on that range's cells. -}
+precedentsWith : (String -> List ( Int, Int )) -> Expr -> List ( Int, Int )
+precedentsWith resolveName expr =
+    precedentsHelp resolveName expr []
+
+
+precedentsHelp : (String -> List ( Int, Int )) -> Expr -> List ( Int, Int ) -> List ( Int, Int )
+precedentsHelp resolveName expr acc =
     case expr of
         Lit _ ->
             acc
 
-        RefE ref ->
+        RefE ref _ ->
             ( ref.col, ref.row ) :: acc
 
-        RangeE range ->
+        RangeE range _ _ ->
             List.foldl (\r a -> ( r.col, r.row ) :: a) acc (Ref.cellsOf range)
 
+        NameE name ->
+            resolveName name ++ acc
+
         Unary _ sub ->
-            precedentsHelp sub acc
+            precedentsHelp resolveName sub acc
 
         Binary _ a b ->
-            precedentsHelp a (precedentsHelp b acc)
+            precedentsHelp resolveName a (precedentsHelp resolveName b acc)
 
         Func _ args ->
-            List.foldl precedentsHelp acc args
+            List.foldl (precedentsHelp resolveName) acc args
 
 
 {-| Topologically sort the given keys using `depsOf` (which must return the precedents of
