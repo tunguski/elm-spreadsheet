@@ -13,13 +13,18 @@ engine is pure and effect-free, so it is fully unit-tested without a browser.
   errors. A hand-written formula parser with Excel/Sheets semantics: operator precedence
   (`-2^2 = 4`, right-associative `^`), `&` concatenation, `%` postfix, `$` absolute refs,
   ranges (`A1:B5`).
-- **~100 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
-  `SIN`, `GCD`, …), statistics (`AVERAGE`, `MEDIAN`, `STDEV`, `COUNTIF`, `SUMIF`,
-  `LARGE`, …), logical (`IF`, `IFS`, `IFERROR`, `SWITCH`, `AND`/`OR`, …), text (`LEFT`,
-  `MID`, `SUBSTITUTE`, `TEXTJOIN`, `TEXT`, …), lookup (`VLOOKUP`, `HLOOKUP`, `INDEX`,
-  `MATCH`, `CHOOSE`), information (`ISNUMBER`, `ISERROR`, `TYPE`, …) and date
-  (`DATE`, `YEAR`, `WEEKDAY`, `DAYS`, …). Lazy forms (`IF`/`IFERROR`) don't evaluate the
+- **~120 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
+  `SIN`, `GCD`, …), statistics (`AVERAGE`, `MEDIAN`, `STDEV`, `PERCENTILE`, `QUARTILE`,
+  `RANK`, …), multi-criteria (`SUMIFS`, `COUNTIFS`, `AVERAGEIFS`, `MINIFS`/`MAXIFS`),
+  finance (`PMT`, `FV`, `PV`, `NPER`, `NPV`, `IRR`), logical (`IF`, `IFS`, `SWITCH`, …),
+  text (`LEFT`, `MID`, `SUBSTITUTE`, `TEXTJOIN`, …), lookup (`VLOOKUP`, `HLOOKUP`, `INDEX`,
+  `MATCH`, `XLOOKUP`, `CHOOSE`), `SUMPRODUCT`, `SUBTOTAL`, information (`ISNUMBER`, `TYPE`,
+  …) and date (`DATE`, `YEAR`, `WEEKDAY`, …). Lazy forms (`IF`/`IFERROR`) don't evaluate the
   untaken branch; aggregates propagate errors and ignore text in ranges, as Excel does.
+- **Workbook features.** Merge a range into one block (the anchor spans it); attach a
+  **note** to a cell; **data validation** (dropdown list, number range, text length,
+  not-blank) that flags offending values; **find & replace** across cells; **frozen**
+  header columns; and one-click **export** to TSV, Markdown, HTML or JSON.
 - **Formatting.** `General`, `Number`, `Currency`, `Percent`, `Scientific`, `DateTime`
   and raw `Custom` Excel-style format codes (`#,##0.00`, `0.0%`, `yyyy-mm-dd`), shared
   with the `TEXT()` function.
@@ -69,14 +74,18 @@ src/Spreadsheet/
   Style.elm      cell styles, conditional rules, colour scales, data bars
   Render.elm     serialize a formula syntax tree back to text
   Refactor.elm   rewrite references for copy/fill and insert/delete row/col
+  Validation.elm data-validation rules
   Sheet.elm      the (opaque) sheet model + sync recalc, structural edits,
-                 clipboard, autofill, sort/filter, named ranges
+                 clipboard, autofill, sort/filter, named ranges, merges,
+                 notes, validation
   Recalc.elm     async, visible-first incremental recalculation
   Csv.elm        CSV import/export
+  Export.elm     one-way export (TSV / Markdown / HTML / JSON)
+  Find.elm       find & replace across cells
   View.elm       the class-styled HTML grid
 src/Main.elm     a demo app (editing, formula bar, sync/async toggle)
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   227 tests
+test/SpreadsheetTest.elm   265 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -127,7 +136,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 227 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 265 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline

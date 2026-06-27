@@ -21,11 +21,14 @@ import Html exposing (Html, a, button, div, h1, h2, input, label, option, p, pre
 import Html.Attributes as HA
 import Html.Events as HE
 import Json.Decode
+import Spreadsheet.Export as Export
+import Spreadsheet.Find as Find
 import Spreadsheet.Format as Format exposing (Format)
 import Spreadsheet.Recalc as Recalc
 import Spreadsheet.Ref as Ref exposing (Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 import Spreadsheet.Style as Style
+import Spreadsheet.Validation as Validation
 import Spreadsheet.View as View
 import Task
 
@@ -82,6 +85,11 @@ type alias Example =
     , status : String
     , toolbar : Bool
     , editTools : Bool
+    , workbench : Bool
+    , frozenCols : Int
+    , findText : String
+    , replaceText : String
+    , exportPanel : String
     , dataRange : Ref.Range
     , wrapClass : String
     , css : Maybe String
@@ -99,6 +107,7 @@ init _ =
             , exStyling
             , exFormatting
             , exEdit
+            , exWorkbook
             , exAsync
             ]
       , drag = Nothing
@@ -148,6 +157,14 @@ type Msg
     | InsertCol Int
     | DeleteCol Int
     | SortCol Int Bool
+      -- workbench: validation dropdown, find/replace, export
+    | Pick Int Ref String
+    | FindInput Int String
+    | ReplaceInput Int String
+    | FindNext Int
+    | ReplaceAllMsg Int
+    | ExportAs Int String
+    | CloseExport Int
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -283,6 +300,37 @@ update msg model =
         SortCol id ascending ->
             ( mapExample id (structuralEdit (\e -> Sheet.sortRange e.dataRange e.selected.col ascending e.sheet)) model, focusGrid id )
 
+        Pick id ref value ->
+            ( mapExample id
+                (\e ->
+                    let
+                        e1 =
+                            record e
+                    in
+                    recalcExample [ ref ] { e1 | editing = Nothing, sheet = Sheet.setRaw ref value e1.sheet }
+                )
+                model
+            , focusGrid id
+            )
+
+        FindInput id t ->
+            ( mapExample id (\e -> moveToFirstHit { e | findText = t }) model, Cmd.none )
+
+        ReplaceInput id t ->
+            ( mapExample id (\e -> { e | replaceText = t }) model, Cmd.none )
+
+        FindNext id ->
+            ( mapExample id moveToNextHit model, focusGrid id )
+
+        ReplaceAllMsg id ->
+            ( mapExample id replaceAllInExample model, Cmd.none )
+
+        ExportAs id fmt ->
+            ( mapExample id (\e -> { e | exportPanel = exportAs fmt e.dataRange e.sheet }) model, Cmd.none )
+
+        CloseExport id ->
+            ( mapExample id (\e -> { e | exportPanel = "" }) model, Cmd.none )
+
         Frame _ ->
             ( { model | examples = List.map stepExample model.examples }, Cmd.none )
 
@@ -318,6 +366,94 @@ restyle id f model =
 selectionOf : Example -> Ref.Range
 selectionOf e =
     Ref.normalize { start = e.anchor, end = e.selected }
+
+
+
+-- WORKBENCH (find / replace / export) ----------------------------------------
+
+
+{-| The find query for an example's current search box. -}
+findQuery : Example -> Find.Query
+findQuery e =
+    { text = e.findText, matchCase = False, wholeCell = False, inFormulas = False }
+
+
+{-| The cells matching the current search (empty when the box is empty). -}
+findHits : Example -> List Ref
+findHits e =
+    if e.findText == "" then
+        []
+
+    else
+        Find.findAll (findQuery e) e.sheet
+
+
+moveToFirstHit : Example -> Example
+moveToFirstHit e =
+    case findHits e of
+        first :: _ ->
+            { e | selected = first, anchor = first }
+
+        [] ->
+            e
+
+
+moveToNextHit : Example -> Example
+moveToNextHit e =
+    let
+        hits =
+            findHits e
+    in
+    case hits of
+        [] ->
+            e
+
+        first :: _ ->
+            let
+                next =
+                    hits
+                        |> List.filter (\h -> keyOrder h > keyOrder e.selected)
+                        |> List.head
+                        |> Maybe.withDefault first
+            in
+            { e | selected = next, anchor = next }
+
+
+keyOrder : Ref -> ( Int, Int )
+keyOrder ref =
+    ( ref.row, ref.col )
+
+
+replaceAllInExample : Example -> Example
+replaceAllInExample e =
+    if e.findText == "" then
+        e
+
+    else
+        let
+            e1 =
+                record e
+        in
+        { e1 | sheet = Find.replaceAll (findQuery e1) e.replaceText e1.sheet }
+
+
+exportAs : String -> Ref.Range -> Sheet -> String
+exportAs fmt range sheet =
+    case fmt of
+        "tsv" ->
+            Export.tsv range sheet
+
+        "md" ->
+            Export.markdown range sheet
+
+        "html" ->
+            Export.html range sheet
+
+        "json" ->
+            Export.json range sheet
+
+        _ ->
+            ""
 
 
 {-| Point/extend the selection. Shift keeps the anchor (growing the block); a plain click
@@ -785,6 +921,11 @@ example id title blurb cols rows sheet =
     , status = ""
     , toolbar = False
     , editTools = False
+    , workbench = False
+    , frozenCols = 0
+    , findText = ""
+    , replaceText = ""
+    , exportPanel = ""
     , dataRange = { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } }
     , wrapClass = ""
     , css = Nothing
@@ -1017,10 +1158,63 @@ editSheet =
         |> Sheet.recalcAll
 
 
-{-| 9 — async, visible-first recalculation of a large sheet. -}
+{-| 9 — workbook features: a merged title, data validation (dropdown + range), a cell
+note, find/replace, frozen first column and one-click export. -}
+exWorkbook : Example
+exWorkbook =
+    let
+        e =
+            example 9
+                "Workbook features: merge, validate, notes, find & export"
+                "A small tracker showing several spreadsheet conveniences at once. The title spans four columns (a merged cell). The Status column is a validation dropdown; Budget is range-validated, so an out-of-range number is flagged red. D4 carries a note (hover the orange corner). The first column is frozen — scroll sideways and Task stays put. Use the find box to highlight and replace text, and the buttons to export the table as TSV, Markdown, HTML or JSON."
+                7
+                7
+                workbookSheet
+    in
+    { e
+        | workbench = True
+        , frozenCols = 1
+        , selected = ref "A2"
+        , anchor = ref "A2"
+        , dataRange = rangeOf "A2" "G6"
+    }
+
+
+workbookSheet : Sheet
+workbookSheet =
+    build 12 8
+        [ ( "A1", "Q3 Project Tracker" )
+        , ( "A2", "Task" ), ( "B2", "Owner" ), ( "C2", "Status" ), ( "D2", "Budget" ), ( "E2", "Vendor" ), ( "F2", "Due" ), ( "G2", "Priority" )
+        , ( "A3", "Design" ), ( "B3", "Ann" ), ( "C3", "Done" ), ( "D3", "5000" ), ( "E3", "Acme" ), ( "F3", "Jul 10" ), ( "G3", "High" )
+        , ( "A4", "Build" ), ( "B4", "Bob" ), ( "C4", "Active" ), ( "D4", "12000" ), ( "E4", "Globex" ), ( "F4", "Aug 02" ), ( "G4", "High" )
+        , ( "A5", "Test" ), ( "B5", "Cy" ), ( "C5", "Todo" ), ( "D5", "3000" ), ( "E5", "Initech" ), ( "F5", "Aug 20" ), ( "G5", "Med" )
+        , ( "A6", "Ship" ), ( "B6", "Dee" ), ( "C6", "Todo" ), ( "D6", "999999" ), ( "E6", "Umbrella" ), ( "F6", "Sep 01" ), ( "G6", "Low" )
+        ]
+        |> withStyle (cells "A1" "G1") (\s -> Style.withColor "#ffffff" { s | bold = True })
+        |> withStyle [ ref "A1" ] (Style.withBackground "#1a73e8")
+        |> withStyle (cells "A2" "G2") (\s -> { s | bold = True })
+        |> Sheet.setFormat (ref "D3") (Format.Currency "$" 0)
+        |> Sheet.setFormat (ref "D4") (Format.Currency "$" 0)
+        |> Sheet.setFormat (ref "D5") (Format.Currency "$" 0)
+        |> Sheet.setFormat (ref "D6") (Format.Currency "$" 0)
+        |> wideColumns
+        |> Sheet.mergeCells (rangeOf "A1" "G1")
+        |> Sheet.addValidation (rangeOf "C3" "C6") (Validation.OneOf [ "Todo", "Active", "Done" ])
+        |> Sheet.addValidation (rangeOf "D3" "D6") (Validation.NumberBetween 0 100000)
+        |> Sheet.setNote (ref "D4") "Includes contractor fees"
+        |> Sheet.recalcAll
+
+
+{-| Widen the columns so the table overflows its container — to show the frozen column. -}
+wideColumns : Sheet -> Sheet
+wideColumns sheet =
+    List.foldl (\c acc -> Sheet.setColWidth c 120 acc) sheet (List.range 0 6)
+
+
+{-| 10 — async, visible-first recalculation of a large sheet. -}
 exAsync : Example
 exAsync =
-    { id = 9
+    { id = 10
     , title = "Big sheets without freezing (async)"
     , blurb = "Click “Load” to fill ~2,400 chained formulas (a running sum and two derived columns down 800 rows) — then scroll through them. The grid is a viewport: only the ~20 rows on screen are ever in the DOM (the rest are spacer-backed), and the engine recalculates in small batches across animation frames, doing the visible rows first. So an 800-row sheet stays responsive and the on-screen region settles immediately."
     , sheet =
@@ -1043,6 +1237,11 @@ exAsync =
     , status = "Idle — nothing loaded yet."
     , toolbar = False
     , editTools = False
+    , workbench = False
+    , frozenCols = 0
+    , findText = ""
+    , replaceText = ""
+    , exportPanel = ""
     , dataRange = { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } }
     , wrapClass = ""
     , css = Nothing
@@ -1129,9 +1328,15 @@ exampleView selecting e =
 
               else
                 []
+            , if e.workbench then
+                [ workbenchToolbar e ]
+
+              else
+                []
             , [ asyncControls e ]
             , styleNode e.css
             , [ div [ HA.class (gridClass e) ] [ View.view (gridConfig (selecting == Just e.id) e) e.sheet ] ]
+            , exportPanelView e
             , cssPanel e.css
             ]
         )
@@ -1254,6 +1459,52 @@ editBtn enabled msg lbl =
     button [ HA.class "ebtn", HA.disabled (not enabled), HE.onClick msg ] [ text lbl ]
 
 
+{-| The find/replace + export toolbar for the workbook example. -}
+workbenchToolbar : Example -> Html Msg
+workbenchToolbar e =
+    let
+        hits =
+            List.length (findHits e)
+
+        count =
+            if e.findText == "" then
+                ""
+
+            else
+                String.fromInt hits ++ " found"
+    in
+    div [ HA.class "fmt-toolbar" ]
+        [ input [ HA.class "fsel wb-find", HA.placeholder "Find…", HA.value e.findText, HE.onInput (FindInput e.id) ] []
+        , editBtn (hits > 0) (FindNext e.id) "Next"
+        , span [ HA.class "wb-count" ] [ text count ]
+        , input [ HA.class "fsel wb-find", HA.placeholder "Replace with…", HA.value e.replaceText, HE.onInput (ReplaceInput e.id) ] []
+        , editBtn (hits > 0) (ReplaceAllMsg e.id) "Replace all"
+        , span [ HA.class "fmt-sep" ] []
+        , span [ HA.class "wb-label" ] [ text "Export:" ]
+        , editBtn True (ExportAs e.id "tsv") "TSV"
+        , editBtn True (ExportAs e.id "md") "Markdown"
+        , editBtn True (ExportAs e.id "html") "HTML"
+        , editBtn True (ExportAs e.id "json") "JSON"
+        ]
+
+
+exportPanelView : Example -> List (Html Msg)
+exportPanelView e =
+    if e.exportPanel == "" then
+        []
+
+    else
+        [ div [ HA.class "css-panel" ]
+            [ div [ HA.class "css-cap" ]
+                [ text "Exported "
+                , text (String.fromInt (Ref.height e.dataRange) ++ "×" ++ String.fromInt (Ref.width e.dataRange) ++ " range:")
+                , button [ HA.class "ebtn wb-close", HE.onClick (CloseExport e.id) ] [ text "Close" ]
+                ]
+            , pre [ HA.class "code" ] [ text e.exportPanel ]
+            ]
+        ]
+
+
 fmtBtn : Bool -> Msg -> String -> String -> Html Msg
 fmtBtn active msg extra glyph =
     button
@@ -1326,11 +1577,14 @@ gridConfig dragging e =
     , selection = Just (selectionOf e)
     , dragging = dragging
     , editing = e.editing
+    , highlights = findHits e
+    , frozenCols = e.frozenCols
     , colWidth = \c -> Sheet.colWidth c e.sheet
     , onCellDown = CellDown e.id
     , onCellEnter = CellEnter e.id
     , onStartEdit = StartEdit e.id
     , onEditInput = EditInput e.id
+    , onPick = Pick e.id
     , onNavKey = NavKey e.id
     , onEditKey = EditKey e.id
     , onResizeStart = ResizeStart e.id

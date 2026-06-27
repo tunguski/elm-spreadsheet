@@ -25,7 +25,7 @@ Appearance is almost entirely CSS classes (`ss-*`); only data-driven colour is i
 
 -}
 
-import Html exposing (Html, div, input, span, table, tbody, td, text, th, thead, tr)
+import Html exposing (Html, div, input, option, select, span, table, tbody, td, text, th, thead, tr)
 import Html.Attributes as HA
 import Html.Events as HE
 import Json.Decode
@@ -56,11 +56,14 @@ type alias Config msg =
     , selection : Maybe Range
     , dragging : Bool
     , editing : Maybe ( Ref, String )
+    , highlights : List Ref
+    , frozenCols : Int
     , colWidth : Int -> Int
     , onCellDown : Ref -> Bool -> msg
     , onCellEnter : Ref -> msg
     , onStartEdit : Ref -> msg
     , onEditInput : String -> msg
+    , onPick : Ref -> String -> msg
     , onNavKey : KeyEvent -> msg
     , onEditKey : KeyEvent -> msg
     , onResizeStart : Int -> Float -> msg
@@ -168,7 +171,16 @@ headerRow config =
 
 columnHeader : Config msg -> Int -> Html msg
 columnHeader config col =
-    th [ HA.class "ss-col-header" ]
+    let
+        frozen =
+            if col < config.frozenCols then
+                HA.class "ss-col-header ss-frozen-col"
+                    :: List.map (\( p, v ) -> HA.style p v) (frozenOffset config { col = col, row = 0 })
+
+            else
+                [ HA.class "ss-col-header" ]
+    in
+    th frozen
         [ span [ HA.class "ss-col-label" ] [ text (Ref.colToString col) ]
         , div [ HA.class "ss-resize", resizeHandler config col ] []
         ]
@@ -178,14 +190,27 @@ dataRow : Config msg -> Sheet -> Int -> Html msg
 dataRow config sheet row =
     tr [ HA.class "ss-row" ]
         (th [ HA.class "ss-row-header" ] [ text (String.fromInt (row + 1)) ]
-            :: List.map (\col -> cell config sheet { col = col, row = row }) (List.range 0 (config.viewCols - 1))
+            :: List.filterMap
+                (\col ->
+                    let
+                        ref =
+                            { col = col, row = row }
+                    in
+                    -- A cell covered by a merge is dropped; the anchor spans it.
+                    if Sheet.isCovered ref sheet then
+                        Nothing
+
+                    else
+                        Just (cell config sheet ref)
+                )
+                (List.range 0 (config.viewCols - 1))
         )
 
 
 cell : Config msg -> Sheet -> Ref -> Html msg
 cell config sheet ref =
     if isEditing config ref then
-        editingCell config ref
+        editingCell config sheet ref
 
     else
         displayCell config sheet ref
@@ -201,8 +226,8 @@ isEditing config ref =
             False
 
 
-editingCell : Config msg -> Ref -> Html msg
-editingCell config ref =
+editingCell : Config msg -> Sheet -> Ref -> Html msg
+editingCell config sheet ref =
     let
         buffer =
             case config.editing of
@@ -212,16 +237,31 @@ editingCell config ref =
                 Nothing ->
                     ""
     in
-    td [ HA.class "ss-cell ss-editing" ]
-        [ input
-            [ HA.id (config.id ++ "-edit")
-            , HA.class "ss-cell-input"
-            , HA.value buffer
-            , HE.onInput config.onEditInput
-            , editHandler config
-            ]
-            []
-        ]
+    case Sheet.dropdownAt ref sheet of
+        Just opts ->
+            -- A list-validation cell edits through a native dropdown.
+            td [ HA.class "ss-cell ss-editing" ]
+                [ select
+                    [ HA.id (config.id ++ "-edit")
+                    , HA.class "ss-cell-input ss-cell-select"
+                    , HE.onInput (config.onPick ref)
+                    ]
+                    (option [ HA.value "" ] [ text "—" ]
+                        :: List.map (\o -> option [ HA.value o, HA.selected (o == buffer) ] [ text o ]) opts
+                    )
+                ]
+
+        Nothing ->
+            td [ HA.class "ss-cell ss-editing" ]
+                [ input
+                    [ HA.id (config.id ++ "-edit")
+                    , HA.class "ss-cell-input"
+                    , HA.value buffer
+                    , HE.onInput config.onEditInput
+                    , editHandler config
+                    ]
+                    []
+                ]
 
 
 displayCell : Config msg -> Sheet -> Ref -> Html msg
@@ -233,25 +273,64 @@ displayCell config sheet ref =
         isActive =
             config.selected == Just ref
 
+        note =
+            Sheet.noteAt ref sheet
+
         stateClasses =
-            (if isActive then
-                [ "ss-selected" ]
+            List.concat
+                [ if isActive then
+                    [ "ss-selected" ]
 
-             else
-                []
-            )
-                ++ (if inSelection config ref && not isActive then
-                        [ "ss-in-range" ]
+                  else
+                    []
+                , if inSelection config ref && not isActive then
+                    [ "ss-in-range" ]
 
-                    else
-                        []
-                   )
+                  else
+                    []
+                , if Sheet.isInvalid ref sheet then
+                    [ "ss-invalid" ]
+
+                  else
+                    []
+                , if note /= Nothing then
+                    [ "ss-noted" ]
+
+                  else
+                    []
+                , if List.member ref config.highlights then
+                    [ "ss-find" ]
+
+                  else
+                    []
+                , if ref.col < config.frozenCols then
+                    [ "ss-frozen-col" ]
+
+                  else
+                    []
+                ]
 
         classAttr =
             HA.class (String.join " " ("ss-cell" :: rendered.classes ++ stateClasses))
 
         inlineAttrs =
-            List.map (\( prop, val ) -> HA.style prop val) rendered.inline
+            List.map (\( prop, val ) -> HA.style prop val) (rendered.inline ++ frozenOffset config ref)
+
+        spanAttrs =
+            case Sheet.mergeAnchorAt ref sheet of
+                Just range ->
+                    [ HA.colspan (Ref.width range), HA.rowspan (Ref.height range) ]
+
+                Nothing ->
+                    []
+
+        noteAttrs =
+            case note of
+                Just n ->
+                    [ HA.title n ]
+
+                Nothing ->
+                    []
 
         dragAttrs =
             if config.dragging then
@@ -259,14 +338,40 @@ displayCell config sheet ref =
 
             else
                 []
+
+        indicators =
+            (case note of
+                Just _ ->
+                    [ span [ HA.class "ss-note-dot" ] [] ]
+
+                Nothing ->
+                    []
+            )
+                ++ (if Sheet.dropdownAt ref sheet /= Nothing then
+                        [ span [ HA.class "ss-dd-caret" ] [ text "▾" ] ]
+
+                    else
+                        []
+                   )
     in
     td
         (classAttr
             :: cellDownHandler config ref
             :: HE.onDoubleClick (config.onStartEdit ref)
-            :: (dragAttrs ++ inlineAttrs)
+            :: (spanAttrs ++ noteAttrs ++ dragAttrs ++ inlineAttrs)
         )
-        [ div [ HA.class "ss-cell-content" ] [ text (Sheet.displayString ref sheet) ] ]
+        (div [ HA.class "ss-cell-content" ] [ text (Sheet.displayString ref sheet) ] :: indicators)
+
+
+{-| Sticky-left offset for a frozen column: the row-header width plus the widths of the
+frozen columns to its left. -}
+frozenOffset : Config msg -> Ref -> List ( String, String )
+frozenOffset config ref =
+    if ref.col < config.frozenCols then
+        [ ( "left", px (40 + List.sum (List.map config.colWidth (List.range 0 (ref.col - 1)))) ) ]
+
+    else
+        []
 
 
 {-| Is a cell within the highlighted selection block? -}
