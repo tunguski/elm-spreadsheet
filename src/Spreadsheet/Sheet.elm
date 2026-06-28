@@ -6,6 +6,8 @@ module Spreadsheet.Sheet exposing
     , dims
     , get
     , valueAt
+    , spillRangeAt
+    , isSpilled
     , rawAt
     , formatAt
     , setRaw
@@ -16,6 +18,8 @@ module Spreadsheet.Sheet exposing
     , addRankRule
     , addColorScale
     , addDataBar
+    , addIconSet
+    , iconAt
     , recalcAll
     , recalcAllWith
     , recalcFrom
@@ -151,6 +155,9 @@ type alias Model =
     , merges : List Range
     , validations : List Valid
     , sparklines : Dict ( Int, Int ) SparkSpec
+    , iconSets : List Style.IconSet
+    , spills : Dict ( Int, Int ) Value
+    , spillAnchors : Dict ( Int, Int ) Range
     }
 
 
@@ -191,6 +198,9 @@ empty rows cols =
         , merges = []
         , validations = []
         , sparklines = Dict.empty
+        , iconSets = []
+        , spills = Dict.empty
+        , spillAnchors = Dict.empty
         }
 
 
@@ -236,7 +246,8 @@ get ref (Sheet m) =
     Dict.get (key ref) m.cells
 
 
-{-| The computed value at a ref — `VEmpty` if the cell is absent. -}
+{-| The computed value at a ref. A real cell wins; otherwise a value that *spilled* into
+the cell from a dynamic array; otherwise `VEmpty`. -}
 valueAt : Ref -> Sheet -> Value
 valueAt ref (Sheet m) =
     case Dict.get (key ref) m.cells of
@@ -244,7 +255,26 @@ valueAt ref (Sheet m) =
             cell.value
 
         Nothing ->
-            VEmpty
+            case Dict.get (key ref) m.spills of
+                Just v ->
+                    v
+
+                Nothing ->
+                    VEmpty
+
+
+{-| If `ref` is the anchor of a live dynamic-array spill, the block it spilled into (so the
+view can outline it and `A1#` can resolve it). -}
+spillRangeAt : Ref -> Sheet -> Maybe Range
+spillRangeAt ref (Sheet m) =
+    Dict.get (key ref) m.spillAnchors
+
+
+{-| True when a cell holds a value that spilled into it from a dynamic array anchored
+elsewhere (i.e. it is a non-anchor spill cell). -}
+isSpilled : Ref -> Sheet -> Bool
+isSpilled ref (Sheet m) =
+    Dict.member (key ref) m.spills && not (Dict.member (key ref) m.cells)
 
 
 {-| A range's current values as a 2-D matrix (row-major), e.g. to feed `Spreadsheet.Spill`. -}
@@ -381,6 +411,25 @@ addColorScale cs (Sheet m) =
 addDataBar : DataBar -> Sheet -> Sheet
 addDataBar db (Sheet m) =
     Sheet { m | dataBars = m.dataBars ++ [ db ] }
+
+
+{-| Append an icon-set conditional format. -}
+addIconSet : Style.IconSet -> Sheet -> Sheet
+addIconSet set (Sheet m) =
+    Sheet { m | iconSets = m.iconSets ++ [ set ] }
+
+
+{-| The `(glyph, colour)` icon a cell earns under the first icon set covering it (numbers
+only). -}
+iconAt : Ref -> Sheet -> Maybe ( String, String )
+iconAt ref ((Sheet m) as sheet) =
+    case valueAt ref sheet of
+        VNumber x ->
+            findFirst (\s -> Ref.contains s.range ref) m.iconSets
+                |> Maybe.map (\s -> Style.iconView s.style (Style.iconLevel s x))
+
+        _ ->
+            Nothing
 
 
 
@@ -550,15 +599,8 @@ evalAndSetWith external k ((Sheet m) as sheet) =
             case cell.parsed of
                 PFormula expr ->
                     let
-                        ctx =
-                            { lookup = \r -> valueAt r sheet
-                            , self = keyToRef k
-                            , names = \name -> Dict.get name m.names
-                            , external = external
-                            }
-
                         value =
-                            Eval.eval ctx expr
+                            Eval.eval (ctxFor external sheet (keyToRef k)) expr
                     in
                     Sheet { m | cells = Dict.insert k { cell | value = value } m.cells }
 
@@ -567,6 +609,19 @@ evalAndSetWith external k ((Sheet m) as sheet) =
 
         Nothing ->
             sheet
+
+
+{-| Build the evaluator context for computing the cell `self` against the sheet's current
+values (including any live spills) and the given cross-sheet resolver. -}
+ctxFor : (String -> Ref -> Value) -> Sheet -> Ref -> Eval.Context
+ctxFor external ((Sheet m) as sheet) self =
+    { lookup = \r -> valueAt r sheet
+    , self = self
+    , names = \name -> Dict.get name m.names
+    , external = external
+    , locals = Eval.noLocals
+    , spill = \anchor -> Dict.get (key anchor) m.spillAnchors
+    }
 
 
 {-| Mark the given keys as `#CIRC!`. -}
@@ -585,16 +640,70 @@ markCircular ks sheet =
         ks
 
 
-{-| Synchronously recompute every formula cell in the sheet, in dependency order. -}
+{-| Synchronously recompute every formula cell in the sheet, in dependency order, then
+materialise any dynamic-array spills (re-evaluating to a fixed point so a formula that
+reads a spilled block sees the spilled values). -}
 recalcAll : Sheet -> Sheet
 recalcAll sheet =
-    runRecalc (formulaCells sheet) sheet
+    recalcAllWith noExternal sheet
 
 
 {-| Like `recalcAll`, but cross-sheet references resolve through `external` — used by
 `Spreadsheet.Workbook` to recompute one sheet against the workbook's current values. -}
 recalcAllWith : (String -> Ref -> Value) -> Sheet -> Sheet
 recalcAllWith external sheet =
+    settle external spillFuel (clearSpillState sheet)
+
+
+{-| Synchronously recompute the cells affected by changes to `changed` (and re-settle any
+spills the change touched).
+
+A dynamic array's spilled cells aren't real cells, so an incremental closure can't see the
+ones a change feeds; recomputing every formula and re-spilling to a fixed point keeps the
+result correct. Sheets that are large enough to need true incrementality use the async
+`Spreadsheet.Recalc` path, which is unchanged. -}
+recalcFrom : List Ref -> Sheet -> Sheet
+recalcFrom _ sheet =
+    recalcAllWith noExternal sheet
+
+
+{-| The maximum number of evaluate-then-spill rounds before giving up (matching the
+workbook's fix-point cap). Chains of spills feeding spills settle in far fewer. -}
+spillFuel : Int
+spillFuel =
+    25
+
+
+clearSpillState : Sheet -> Sheet
+clearSpillState (Sheet m) =
+    Sheet { m | spills = Dict.empty, spillAnchors = Dict.empty }
+
+
+{-| Evaluate every formula in order, then materialise spills; repeat until the spilled
+state stops changing (or `fuel` runs out). -}
+settle : (String -> Ref -> Value) -> Int -> Sheet -> Sheet
+settle external fuel sheet =
+    let
+        evaluated =
+            evalAllFormulas external sheet
+
+        spilled =
+            computeSpills external evaluated
+    in
+    if fuel <= 0 || spillState evaluated == spillState spilled then
+        spilled
+
+    else
+        settle external (fuel - 1) spilled
+
+
+spillState : Sheet -> ( Dict ( Int, Int ) Value, Dict ( Int, Int ) Range )
+spillState (Sheet m) =
+    ( m.spills, m.spillAnchors )
+
+
+evalAllFormulas : (String -> Ref -> Value) -> Sheet -> Sheet
+evalAllFormulas external sheet =
     let
         ( ordered, cyclic ) =
             recalcOrder (formulaCells sheet) sheet
@@ -605,22 +714,95 @@ recalcAllWith external sheet =
     markCircular (Set.toList cyclic) evaluated
 
 
-{-| Synchronously recompute the cells affected by changes to `changed`. -}
-recalcFrom : List Ref -> Sheet -> Sheet
-recalcFrom changed sheet =
-    runRecalc (dirtyClosure changed sheet) sheet
+{-| Recompute the spilled cells from scratch: clear the old spill state, then for every
+formula whose result is a dynamic-array block, write the block's cells (minus the anchor)
+into the spill layer — or mark the anchor `#SPILL!` if the block would overwrite an
+occupied cell. -}
+computeSpills : (String -> Ref -> Value) -> Sheet -> Sheet
+computeSpills external sheet =
+    List.foldl (spillOne external) (clearSpillState sheet) (formulaCells sheet)
 
 
-runRecalc : List ( Int, Int ) -> Sheet -> Sheet
-runRecalc dirty sheet =
+spillOne : (String -> Ref -> Value) -> ( Int, Int ) -> Sheet -> Sheet
+spillOne external k ((Sheet m) as sheet) =
+    case Dict.get k m.cells of
+        Just cell ->
+            case cell.parsed of
+                PFormula expr ->
+                    case Eval.evalMatrix (ctxFor external sheet (keyToRef k)) expr of
+                        Just matrix ->
+                            if isSpillable matrix then
+                                spillMatrix (keyToRef k) matrix sheet
+
+                            else
+                                sheet
+
+                        Nothing ->
+                            sheet
+
+                _ ->
+                    sheet
+
+        Nothing ->
+            sheet
+
+
+{-| A result spills only if it occupies more than one cell. -}
+isSpillable : List (List Value) -> Bool
+isSpillable matrix =
     let
-        ( ordered, cyclic ) =
-            recalcOrder dirty sheet
+        rows =
+            List.length matrix
 
-        evaluated =
-            List.foldl evalAndSet sheet ordered
+        cols =
+            Maybe.withDefault 0 (List.maximum (List.map List.length matrix))
     in
-    markCircular (Set.toList cyclic) evaluated
+    rows * cols > 1
+
+
+spillMatrix : Ref -> List (List Value) -> Sheet -> Sheet
+spillMatrix anchor matrix ((Sheet m) as sheet) =
+    let
+        children =
+            List.concat
+                (List.indexedMap
+                    (\dr row ->
+                        List.indexedMap
+                            (\dc v -> ( ( anchor.col + dc, anchor.row + dr ), v ))
+                            row
+                    )
+                    matrix
+                )
+                |> List.filter (\( ck, _ ) -> ck /= ( anchor.col, anchor.row ))
+
+        collides =
+            List.any (\( ck, _ ) -> Dict.member ck m.cells) children
+
+        height =
+            List.length matrix
+
+        width =
+            Maybe.withDefault 0 (List.maximum (List.map List.length matrix))
+    in
+    if collides then
+        case Dict.get (key anchor) m.cells of
+            Just cell ->
+                Sheet { m | cells = Dict.insert (key anchor) { cell | value = VError Value.Spill } m.cells }
+
+            Nothing ->
+                sheet
+
+    else
+        Sheet
+            { m
+                | spills = List.foldl (\( ck, v ) acc -> Dict.insert ck v acc) m.spills children
+                , spillAnchors =
+                    Dict.insert (key anchor)
+                        { start = anchor
+                        , end = { col = anchor.col + width - 1, row = anchor.row + height - 1 }
+                        }
+                        m.spillAnchors
+            }
 
 
 
@@ -798,6 +980,7 @@ adjustRanges f m =
         , colorScales = List.filterMap (\cs -> Maybe.map (\rng -> { cs | range = rng }) (f cs.range)) m.colorScales
         , dataBars = List.filterMap (\db -> Maybe.map (\rng -> { db | range = rng }) (f db.range)) m.dataBars
         , rankRules = List.filterMap (\rr -> Maybe.map (\rng -> { rr | range = rng }) (f rr.range)) m.rankRules
+        , iconSets = List.filterMap (\is -> Maybe.map (\rng -> { is | range = rng }) (f is.range)) m.iconSets
         , merges = List.filterMap f m.merges
         , validations = List.filterMap (\vd -> Maybe.map (\rng -> { vd | range = rng }) (f vd.range)) m.validations
         , names =

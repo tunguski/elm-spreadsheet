@@ -39,7 +39,8 @@ type Value
 
 
 {-| The standard spreadsheet error values. `Circular` and `Parse` are our own,
-surfaced as `#CIRC!` and `#ERROR!`.
+surfaced as `#CIRC!` and `#ERROR!`; `Spill` (`#SPILL!`) marks a dynamic-array result that
+cannot spill because a target cell is already occupied.
 -}
 type Error
     = DivZero
@@ -50,6 +51,7 @@ type Error
     | NA
     | Circular
     | Parse
+    | Spill
 
 
 {-| The visible text of an error, e.g. `#DIV/0!`. -}
@@ -79,6 +81,9 @@ errorText err =
 
         Parse ->
             "#ERROR!"
+
+        Spill ->
+            "#SPILL!"
 
 
 {-| True when the value is any error. -}

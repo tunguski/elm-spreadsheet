@@ -42,6 +42,7 @@ type Token
     | TComma
     | TColon
     | TBang
+    | THash
     | TPlus
     | TMinus
     | TStar
@@ -86,6 +87,9 @@ tokenizeHelp chars acc =
 
             else if c == '!' then
                 tokenizeHelp rest (TBang :: acc)
+
+            else if c == '#' then
+                tokenizeHelp rest (THash :: acc)
 
             else if c == '+' then
                 tokenizeHelp rest (TPlus :: acc)
@@ -449,7 +453,8 @@ parseUnary tokens =
             parsePostfix tokens
 
 
-{-| Postfix `%` (possibly repeated): `50%` → `0.5`. -}
+{-| Postfix operators: the spill reference `#` (turning `A1` into `A1#`, the block that
+spilled from `A1`) and `%` (possibly repeated): `50%` → `0.5`. -}
 parsePostfix : P
 parsePostfix tokens =
     case parsePrimary tokens of
@@ -457,7 +462,17 @@ parsePostfix tokens =
             Err e
 
         Ok ( e, rest ) ->
-            Ok (applyPercents e rest)
+            case rest of
+                THash :: more ->
+                    case e of
+                        RefE ref _ ->
+                            Ok (applyPercents (SpillRefE ref) more)
+
+                        _ ->
+                            Err "the spill operator # must follow a cell reference"
+
+                _ ->
+                    Ok (applyPercents e rest)
 
 
 applyPercents : Expr -> List Token -> ( Expr, List Token )

@@ -52,6 +52,9 @@ render e =
         NameE name ->
             ( name, atomP )
 
+        SpillRefE ref ->
+            ( Ref.toA1 ref ++ "#", atomP )
+
         SheetRefE sheetName ref abs ->
             ( sheetName ++ "!" ++ Ref.toA1Abs abs ref, atomP )
 

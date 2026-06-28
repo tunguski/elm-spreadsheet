@@ -51,6 +51,11 @@ precedentsHelp resolveName expr acc =
         NameE name ->
             resolveName name ++ acc
 
+        SpillRefE ref ->
+            -- A spill reference depends (at least) on its anchor; the rest of the spilled
+            -- block is filled in by the same anchor, so the fix-point recalc settles it.
+            ( ref.col, ref.row ) :: acc
+
         SheetRefE _ _ _ ->
             -- Cross-sheet refs are not local precedents; the workbook resolves them.
             acc

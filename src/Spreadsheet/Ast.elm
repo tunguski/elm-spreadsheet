@@ -24,14 +24,17 @@ import Spreadsheet.Value exposing (Value)
 `RefE`/`RangeE` carry their `$`-absoluteness flags alongside the resolved coordinates, so
 copy/fill can shift only the relative parts and the serializer can reproduce the `$`
 markers. `NameE` is a defined-name reference (e.g. `TaxRate`) resolved against the sheet's
-name table at evaluation time. `SheetRefE`/`SheetRangeE` are **cross-sheet** references
-(`Data!A1`, `Data!A1:B5`) carrying the other sheet's name; they are resolved against the
-workbook (`Spreadsheet.Workbook`) rather than the current sheet. -}
+name table at evaluation time. `SpillRefE` is a **spill reference** (`A1#`): it stands for
+the whole dynamic-array block that spilled from anchor `A1`, resolved against the sheet's
+recorded spill ranges at evaluation time. `SheetRefE`/`SheetRangeE` are **cross-sheet**
+references (`Data!A1`, `Data!A1:B5`) carrying the other sheet's name; they are resolved
+against the workbook (`Spreadsheet.Workbook`) rather than the current sheet. -}
 type Expr
     = Lit Value
     | RefE Ref Abs
     | RangeE Range Abs Abs
     | NameE String
+    | SpillRefE Ref
     | SheetRefE String Ref Abs
     | SheetRangeE String Range Abs Abs
     | Unary UnaryOp Expr

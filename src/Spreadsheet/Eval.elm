@@ -1,7 +1,10 @@
 module Spreadsheet.Eval exposing
     ( Context
+    , noLocals
+    , noSpill
     , eval
     , evalString
+    , evalMatrix
     )
 
 {-| Evaluate a parsed formula against a sheet.
@@ -20,23 +23,42 @@ its value (ROW, COLUMN) are intercepted here before arguments are evaluated.
 
 -}
 
+import Dict exposing (Dict)
 import Spreadsheet.Ast exposing (BinaryOp(..), Expr(..), UnaryOp(..))
 import Spreadsheet.Format as Format
 import Spreadsheet.Functions as Functions exposing (Arg(..))
 import Spreadsheet.Parser as Parser
 import Spreadsheet.Ref as Ref exposing (Range, Ref)
+import Spreadsheet.Spill as Spill
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
 
 
 {-| What the evaluator needs from the sheet: read another cell's value (`lookup`), know
-which cell is being computed (`self`), resolve a defined name to its range (`names`), and
-read a cell on another sheet of the workbook (`external sheetName ref`). -}
+which cell is being computed (`self`), resolve a defined name to its range (`names`), read
+a cell on another sheet of the workbook (`external sheetName ref`), look up a `LET`-bound
+local (`locals`), and resolve a spill anchor to the block that spilled from it (`spill`,
+for the `A1#` operator). -}
 type alias Context =
     { lookup : Ref -> Value
     , self : Ref
     , names : String -> Maybe Range
     , external : String -> Ref -> Value
+    , locals : String -> Maybe Value
+    , spill : Ref -> Maybe Range
     }
+
+
+{-| A `locals` resolver with no bindings — the default outside a `LET`. -}
+noLocals : String -> Maybe Value
+noLocals _ =
+    Nothing
+
+
+{-| A `spill` resolver that knows of no spilled blocks — the default when a sheet has no
+dynamic arrays (or when evaluating outside one). -}
+noSpill : Ref -> Maybe Range
+noSpill _ =
+    Nothing
 
 
 {-| Parse and evaluate a formula string (the leading `=` is optional). A parse failure
@@ -65,16 +87,29 @@ eval ctx expr =
             scalarOfRange ctx range
 
         NameE name ->
-            case ctx.names name of
-                Just range ->
-                    if range.start == range.end then
-                        ctx.lookup range.start
-
-                    else
-                        scalarOfRange ctx range
+            case ctx.locals name of
+                Just v ->
+                    v
 
                 Nothing ->
-                    VError NameErr
+                    case ctx.names name of
+                        Just range ->
+                            if range.start == range.end then
+                                ctx.lookup range.start
+
+                            else
+                                scalarOfRange ctx range
+
+                        Nothing ->
+                            VError NameErr
+
+        SpillRefE anchor ->
+            case ctx.spill anchor of
+                Just range ->
+                    scalarOfRange ctx range
+
+                Nothing ->
+                    VError RefErr
 
         SheetRefE sheetName ref _ ->
             ctx.external sheetName ref
@@ -101,6 +136,19 @@ eval ctx expr =
 
                     Nothing ->
                         VError RefErr
+
+            else if name == "LET" then
+                evalLet ctx args
+
+            else if isArrayForm name then
+                -- Used where a scalar is expected, an array result collapses to its
+                -- top-left cell (the implicit-intersection rule).
+                case arrayResult ctx name args of
+                    Just matrix ->
+                        topLeftOf matrix
+
+                    Nothing ->
+                        VError ValueErr
 
             else
                 evalFunc ctx name args
@@ -198,6 +246,545 @@ indirectRange ctx args =
             Nothing
 
 
+
+-- DYNAMIC ARRAYS -------------------------------------------------------------
+-- The "spilling" functions return a 2-D block rather than a scalar. `evalMatrix` is the
+-- entry point the sheet uses to decide whether a formula spills (and into what); in a
+-- scalar position the block collapses to its top-left cell, and in an argument position
+-- it becomes a `Matrix` the aggregates already understand.
+
+
+{-| If an expression produces a dynamic-array block — a spilling function (`SORT`,
+`FILTER`, `SEQUENCE`, `HSTACK`, `LINEST`, …) or a spill reference (`A1#`) — return that
+block. The sheet calls this on each formula cell to materialise spills. Plain scalars,
+ranges and aggregates return `Nothing` (they don't spill). -}
+evalMatrix : Context -> Expr -> Maybe (List (List Value))
+evalMatrix ctx expr =
+    case expr of
+        SpillRefE anchor ->
+            Maybe.map (matrixViaLookup ctx) (ctx.spill anchor)
+
+        Func name args ->
+            if isArrayForm name then
+                arrayResult ctx name args
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+matrixViaLookup : Context -> Range -> List (List Value)
+matrixViaLookup ctx range =
+    List.map (List.map ctx.lookup) (Ref.rowsOf range)
+
+
+{-| The names of the spilling array functions. -}
+isArrayForm : String -> Bool
+isArrayForm name =
+    List.member name
+        [ "UNIQUE", "SORT", "SORTBY", "FILTER", "SEQUENCE", "TRANSPOSE"
+        , "HSTACK", "VSTACK", "CHOOSEROWS", "CHOOSECOLS", "TAKE", "DROP", "TOROW", "TOCOL"
+        , "LINEST", "TREND", "GROWTH"
+        ]
+
+
+{-| Evaluate a spilling array function to its 2-D result. -}
+arrayResult : Context -> String -> List Expr -> Maybe (List (List Value))
+arrayResult ctx name args =
+    case name of
+        "UNIQUE" ->
+            Maybe.map Spill.unique (argMatrixAt ctx 0 args)
+
+        "TRANSPOSE" ->
+            Maybe.map Spill.transpose (argMatrixAt ctx 0 args)
+
+        "SORT" ->
+            Maybe.map
+                (\m -> Spill.sortBy (intArg ctx 1 1 args - 1) (floatArg ctx 2 1 args >= 0) m)
+                (argMatrixAt ctx 0 args)
+
+        "SORTBY" ->
+            sortByResult ctx args
+
+        "FILTER" ->
+            filterResult ctx args
+
+        "SEQUENCE" ->
+            Just
+                (Spill.sequence
+                    (max 0 (intArg ctx 0 1 args))
+                    (max 1 (intArg ctx 1 1 args))
+                    (floatArg ctx 2 1 args)
+                    (floatArg ctx 3 1 args)
+                )
+
+        "HSTACK" ->
+            Just (hstack (List.map (argMatrix ctx) args))
+
+        "VSTACK" ->
+            Just (vstack (List.map (argMatrix ctx) args))
+
+        "CHOOSEROWS" ->
+            chooseLines ctx args True
+
+        "CHOOSECOLS" ->
+            chooseLines ctx args False
+
+        "TAKE" ->
+            Just (takeDrop ctx args True)
+
+        "DROP" ->
+            Just (takeDrop ctx args False)
+
+        "TOROW" ->
+            Maybe.map (\m -> [ List.concat m ]) (argMatrixAt ctx 0 args)
+
+        "TOCOL" ->
+            Maybe.map (\m -> List.map (\v -> [ v ]) (List.concat m)) (argMatrixAt ctx 0 args)
+
+        "LINEST" ->
+            linestResult ctx args
+
+        "TREND" ->
+            trendResult ctx args False
+
+        "GROWTH" ->
+            trendResult ctx args True
+
+        _ ->
+            Nothing
+
+
+argMatrix : Context -> Expr -> List (List Value)
+argMatrix ctx e =
+    Functions.matrixOf (evalArg ctx e)
+
+
+argMatrixAt : Context -> Int -> List Expr -> Maybe (List (List Value))
+argMatrixAt ctx i args =
+    Maybe.map (argMatrix ctx) (List.head (List.drop i args))
+
+
+floatArg : Context -> Int -> Float -> List Expr -> Float
+floatArg ctx i default args =
+    case List.head (List.drop i args) of
+        Just e ->
+            case Value.toNumber (eval ctx e) of
+                Ok x ->
+                    x
+
+                Err _ ->
+                    default
+
+        Nothing ->
+            default
+
+
+intArgMaybe : Context -> Int -> List Expr -> Maybe Int
+intArgMaybe ctx i args =
+    List.head (List.drop i args)
+        |> Maybe.andThen (\e -> Result.toMaybe (Value.toNumber (eval ctx e)))
+        |> Maybe.map round
+
+
+topLeftOf : List (List Value) -> Value
+topLeftOf matrix =
+    case matrix of
+        row :: _ ->
+            case row of
+                v :: _ ->
+                    v
+
+                [] ->
+                    VError NA
+
+        [] ->
+            VError NA
+
+
+sortByResult : Context -> List Expr -> Maybe (List (List Value))
+sortByResult ctx args =
+    case ( argMatrixAt ctx 0 args, argMatrixAt ctx 1 args ) of
+        ( Just rows, Just byM ) ->
+            let
+                asc =
+                    floatArg ctx 2 1 args >= 0
+
+                keys =
+                    List.map (\r -> Maybe.withDefault VEmpty (List.head r)) byM
+
+                paired =
+                    List.map2 (\r k -> ( k, r )) rows keys
+            in
+            Just
+                (List.map Tuple.second
+                    (List.sortWith
+                        (\( ka, _ ) ( kb, _ ) ->
+                            let
+                                o =
+                                    Value.compare ka kb
+                            in
+                            if asc then
+                                o
+
+                            else
+                                flipOrder o
+                        )
+                        paired
+                    )
+                )
+
+        _ ->
+            Nothing
+
+
+filterResult : Context -> List Expr -> Maybe (List (List Value))
+filterResult ctx args =
+    case ( argMatrixAt ctx 0 args, argMatrixAt ctx 1 args ) of
+        ( Just rows, Just maskM ) ->
+            let
+                mask =
+                    List.map (\r -> truthy (Maybe.withDefault VEmpty (List.head r))) maskM
+
+                kept =
+                    List.map2 (\r keep -> ( keep, r )) rows mask
+                        |> List.filter Tuple.first
+                        |> List.map Tuple.second
+            in
+            if List.isEmpty kept then
+                case List.head (List.drop 2 args) of
+                    Just e ->
+                        Just [ [ eval ctx e ] ]
+
+                    Nothing ->
+                        Just [ [ VError NA ] ]
+
+            else
+                Just kept
+
+        _ ->
+            Nothing
+
+
+truthy : Value -> Bool
+truthy v =
+    case v of
+        VBool b ->
+            b
+
+        VNumber n ->
+            n /= 0
+
+        _ ->
+            case Value.toBool v of
+                Ok b ->
+                    b
+
+                Err _ ->
+                    False
+
+
+hstack : List (List (List Value)) -> List (List Value)
+hstack mats =
+    let
+        h =
+            Maybe.withDefault 0 (List.maximum (List.map List.length mats))
+    in
+    List.map (\i -> List.concatMap (rowAt i) mats) (List.range 0 (h - 1))
+
+
+rowAt : Int -> List (List Value) -> List Value
+rowAt i m =
+    case List.head (List.drop i m) of
+        Just row ->
+            row
+
+        Nothing ->
+            List.repeat (matWidth m) VEmpty
+
+
+matWidth : List (List Value) -> Int
+matWidth m =
+    Maybe.withDefault 0 (List.maximum (List.map List.length m))
+
+
+vstack : List (List (List Value)) -> List (List Value)
+vstack mats =
+    let
+        w =
+            Maybe.withDefault 0 (List.maximum (List.map matWidth mats))
+    in
+    List.map (\row -> row ++ List.repeat (max 0 (w - List.length row)) VEmpty) (List.concat mats)
+
+
+chooseLines : Context -> List Expr -> Bool -> Maybe (List (List Value))
+chooseLines ctx args isRows =
+    case args of
+        first :: idxExprs ->
+            let
+                m =
+                    if isRows then
+                        argMatrix ctx first
+
+                    else
+                        Spill.transpose (argMatrix ctx first)
+
+                len =
+                    List.length m
+
+                idxs =
+                    List.map (\e -> round (Result.withDefault 0 (Value.toNumber (eval ctx e)))) idxExprs
+
+                picked =
+                    List.filterMap (\i -> List.head (List.drop (resolveIndex i len) m)) idxs
+            in
+            Just
+                (if isRows then
+                    picked
+
+                 else
+                    Spill.transpose picked
+                )
+
+        _ ->
+            Nothing
+
+
+{-| Turn a 1-based index (negative counts from the end) into a 0-based offset. -}
+resolveIndex : Int -> Int -> Int
+resolveIndex i len =
+    if i < 0 then
+        len + i
+
+    else
+        i - 1
+
+
+takeDrop : Context -> List Expr -> Bool -> List (List Value)
+takeDrop ctx args isTake =
+    case args of
+        first :: _ ->
+            let
+                m =
+                    argMatrix ctx first
+
+                afterRows =
+                    case intArgMaybe ctx 1 args of
+                        Just n ->
+                            sliceLines isTake n m
+
+                        Nothing ->
+                            m
+            in
+            case intArgMaybe ctx 2 args of
+                Just n ->
+                    Spill.transpose (sliceLines isTake n (Spill.transpose afterRows))
+
+                Nothing ->
+                    afterRows
+
+        [] ->
+            []
+
+
+sliceLines : Bool -> Int -> List a -> List a
+sliceLines isTake n lines =
+    let
+        len =
+            List.length lines
+
+        an =
+            abs n
+    in
+    if isTake then
+        if n >= 0 then
+            List.take an lines
+
+        else
+            List.drop (max 0 (len - an)) lines
+
+    else if n >= 0 then
+        List.drop an lines
+
+    else
+        List.take (max 0 (len - an)) lines
+
+
+numbersOfArg : Context -> Int -> List Expr -> Maybe (List Float)
+numbersOfArg ctx i args =
+    Maybe.map (\m -> List.filterMap numOf (List.concat m)) (argMatrixAt ctx i args)
+
+
+numOf : Value -> Maybe Float
+numOf v =
+    case v of
+        VNumber x ->
+            Just x
+
+        _ ->
+            Nothing
+
+
+linestResult : Context -> List Expr -> Maybe (List (List Value))
+linestResult ctx args =
+    case ( numbersOfArg ctx 0 args, numbersOfArg ctx 1 args ) of
+        ( Just ys, Just xs ) ->
+            case linreg ys xs of
+                Just ( slope, intercept ) ->
+                    Just [ [ VNumber slope, VNumber intercept ] ]
+
+                Nothing ->
+                    Just [ [ VError DivZero, VError DivZero ] ]
+
+        _ ->
+            Nothing
+
+
+trendResult : Context -> List Expr -> Bool -> Maybe (List (List Value))
+trendResult ctx args isGrowth =
+    case numbersOfArg ctx 0 args of
+        Just ysRaw ->
+            let
+                ys =
+                    if isGrowth then
+                        List.map (logBase e) ysRaw
+
+                    else
+                        ysRaw
+
+                xs =
+                    case numbersOfArg ctx 1 args of
+                        Just xv ->
+                            xv
+
+                        Nothing ->
+                            List.map toFloat (List.range 1 (List.length ysRaw))
+
+                newxs =
+                    case numbersOfArg ctx 2 args of
+                        Just nv ->
+                            nv
+
+                        Nothing ->
+                            xs
+            in
+            case linreg ys xs of
+                Just ( slope, intercept ) ->
+                    Just
+                        (List.map
+                            (\x ->
+                                let
+                                    yp =
+                                        intercept + slope * x
+                                in
+                                [ VNumber
+                                    (if isGrowth then
+                                        e ^ yp
+
+                                     else
+                                        yp
+                                    )
+                                ]
+                            )
+                            newxs
+                        )
+
+                Nothing ->
+                    Nothing
+
+        Nothing ->
+            Nothing
+
+
+{-| Ordinary-least-squares fit of `ys` on `xs`: `Just (slope, intercept)`, or `Nothing`
+when there are fewer than two points or the x's have no spread. -}
+linreg : List Float -> List Float -> Maybe ( Float, Float )
+linreg ys xs =
+    let
+        pairs =
+            List.map2 (\y x -> ( y, x )) ys xs
+
+        n =
+            toFloat (List.length pairs)
+    in
+    if List.length pairs < 2 then
+        Nothing
+
+    else
+        let
+            mx =
+                List.sum (List.map Tuple.second pairs) / n
+
+            my =
+                List.sum (List.map Tuple.first pairs) / n
+
+            sxx =
+                List.sum (List.map (\( _, x ) -> (x - mx) ^ 2) pairs)
+
+            sxy =
+                List.sum (List.map (\( y, x ) -> (x - mx) * (y - my)) pairs)
+        in
+        if sxx == 0 then
+            Nothing
+
+        else
+            Just ( sxy / sxx, my - sxy / sxx * mx )
+
+
+flipOrder : Order -> Order
+flipOrder o =
+    case o of
+        LT ->
+            GT
+
+        EQ ->
+            EQ
+
+        GT ->
+            LT
+
+
+
+-- LET ------------------------------------------------------------------------
+
+
+{-| `LET(name1, value1, …, calc)`: bind each `name` to its evaluated `value` (later
+bindings can use earlier ones), then evaluate the final `calc` with those names in scope. -}
+evalLet : Context -> List Expr -> Value
+evalLet ctx args =
+    letBind ctx Dict.empty args
+
+
+letBind : Context -> Dict String Value -> List Expr -> Value
+letBind ctx env args =
+    case args of
+        [ finalE ] ->
+            evalWithEnv ctx env finalE
+
+        (NameE name) :: valueE :: rest ->
+            letBind ctx (Dict.insert name (evalWithEnv ctx env valueE) env) rest
+
+        _ ->
+            VError ValueErr
+
+
+evalWithEnv : Context -> Dict String Value -> Expr -> Value
+evalWithEnv ctx env e =
+    eval { ctx | locals = extendLocals env ctx } e
+
+
+extendLocals : Dict String Value -> Context -> String -> Maybe Value
+extendLocals env ctx n =
+    case Dict.get n env of
+        Just v ->
+            Just v
+
+        Nothing ->
+            ctx.locals n
+
+
 {-| A range used where a scalar is expected collapses to its top-left cell. -}
 scalarOfRange : Context -> Range -> Value
 scalarOfRange ctx range =
@@ -255,12 +842,25 @@ evalArg ctx expr =
             matrixOf ctx range
 
         NameE name ->
-            case ctx.names name of
+            case ctx.locals name of
+                Just v ->
+                    Scalar v
+
+                Nothing ->
+                    case ctx.names name of
+                        Just range ->
+                            matrixOf ctx range
+
+                        Nothing ->
+                            Scalar (VError NameErr)
+
+        SpillRefE anchor ->
+            case ctx.spill anchor of
                 Just range ->
                     matrixOf ctx range
 
                 Nothing ->
-                    Scalar (VError NameErr)
+                    Scalar (VError RefErr)
 
         SheetRangeE sheetName range _ _ ->
             Matrix (List.map (List.map (ctx.external sheetName)) (Ref.rowsOf range))
@@ -273,6 +873,14 @@ evalArg ctx expr =
 
                     Nothing ->
                         Scalar (VError RefErr)
+
+            else if isArrayForm name then
+                case arrayResult ctx name fargs of
+                    Just matrix ->
+                        Matrix matrix
+
+                    Nothing ->
+                        Scalar (VError ValueErr)
 
             else
                 Scalar (eval ctx expr)
