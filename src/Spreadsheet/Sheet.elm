@@ -481,13 +481,24 @@ precedentsOf (Sheet m) k =
         Just cell ->
             case cell.parsed of
                 PFormula expr ->
-                    Deps.precedentsWith (resolveNameKeys m) expr
+                    Deps.precedentsWith (depResolvers m) expr
 
                 _ ->
                     []
 
         Nothing ->
             []
+
+
+{-| The resolvers Deps uses to expand defined names, structured table references and spill
+references into the cells they cover — so a formula using `Table[Col]` or `A1#` depends on
+those cells and recomputes in the right order. -}
+depResolvers : Model -> Deps.Resolvers
+depResolvers m =
+    { name = resolveNameKeys m
+    , table = \tableName _ -> resolveTableKeys m tableName
+    , spill = \anchor -> resolveSpillKeys m anchor
+    }
 
 
 {-| Cell keys a defined name stands for (empty if undefined). -}
@@ -499,6 +510,30 @@ resolveNameKeys m name =
 
         Nothing ->
             []
+
+
+{-| Cell keys a structured reference covers — the whole table range (a safe
+over-approximation that keeps recalculation order and propagation correct). -}
+resolveTableKeys : Model -> String -> List ( Int, Int )
+resolveTableKeys m tableName =
+    case Dict.get (String.toUpper tableName) m.tables of
+        Just t ->
+            List.map key (Ref.cellsOf t.range)
+
+        Nothing ->
+            []
+
+
+{-| Cell keys a spill reference covers — the block currently anchored there, or the anchor
+itself if nothing has spilled yet. -}
+resolveSpillKeys : Model -> Ref -> List ( Int, Int )
+resolveSpillKeys m anchor =
+    case Dict.get (key anchor) m.spillAnchors of
+        Just range ->
+            List.map key (Ref.cellsOf range)
+
+        Nothing ->
+            [ key anchor ]
 
 
 {-| The reverse graph: cell key → keys of formula cells that read it. -}
@@ -1598,7 +1633,13 @@ displayString ref sheet =
             Format.format cell.format cell.value
 
         Nothing ->
-            ""
+            -- No real cell here, but a dynamic array may have spilled a value into it.
+            case valueAt ref sheet of
+                VEmpty ->
+                    ""
+
+                v ->
+                    Format.format Format.General v
 
 
 {-| A cell's own (static) style. -}

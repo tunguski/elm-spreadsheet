@@ -1,6 +1,8 @@
 module Spreadsheet.Deps exposing
     ( precedents
     , precedentsWith
+    , Resolvers
+    , noResolvers
     , topoSort
     )
 
@@ -22,22 +24,41 @@ import Spreadsheet.Ref as Ref exposing (Ref)
 
 
 {-| Every cell address an expression references, as `(col, row)` keys. Ranges are
-expanded to all their member cells. Defined names contribute nothing (use
-`precedentsWith` to resolve them). -}
+expanded to all their member cells. Defined names, tables and spill references contribute
+nothing (use `precedentsWith` to resolve them). -}
 precedents : Expr -> List ( Int, Int )
 precedents expr =
-    precedentsWith (\_ -> []) expr
+    precedentsWith noResolvers expr
 
 
-{-| Like `precedents`, but a resolver maps each defined name to the cell keys it stands
-for, so a formula referencing a named range still depends on that range's cells. -}
-precedentsWith : (String -> List ( Int, Int )) -> Expr -> List ( Int, Int )
-precedentsWith resolveName expr =
-    precedentsHelp resolveName expr []
+{-| Resolvers that map the *indirect* references — defined names, structured table
+references and spill references — to the cell keys they stand for, so a formula using them
+still depends on the underlying cells. -}
+type alias Resolvers =
+    { name : String -> List ( Int, Int )
+    , table : String -> String -> List ( Int, Int )
+    , spill : Ref -> List ( Int, Int )
+    }
 
 
-precedentsHelp : (String -> List ( Int, Int )) -> Expr -> List ( Int, Int ) -> List ( Int, Int )
-precedentsHelp resolveName expr acc =
+{-| Resolvers that expand nothing — used by `precedents`. -}
+noResolvers : Resolvers
+noResolvers =
+    { name = \_ -> []
+    , table = \_ _ -> []
+    , spill = \_ -> []
+    }
+
+
+{-| Like `precedents`, but with resolvers for names / tables / spills so a formula
+referencing a named range, `Table[Col]` or `A1#` still depends on those cells. -}
+precedentsWith : Resolvers -> Expr -> List ( Int, Int )
+precedentsWith resolvers expr =
+    precedentsHelp resolvers expr []
+
+
+precedentsHelp : Resolvers -> Expr -> List ( Int, Int ) -> List ( Int, Int )
+precedentsHelp resolvers expr acc =
     case expr of
         Lit _ ->
             acc
@@ -49,17 +70,13 @@ precedentsHelp resolveName expr acc =
             List.foldl (\r a -> ( r.col, r.row ) :: a) acc (Ref.cellsOf range)
 
         NameE name ->
-            resolveName name ++ acc
+            resolvers.name name ++ acc
 
         SpillRefE ref ->
-            -- A spill reference depends (at least) on its anchor; the rest of the spilled
-            -- block is filled in by the same anchor, so the fix-point recalc settles it.
-            ( ref.col, ref.row ) :: acc
+            resolvers.spill ref ++ acc
 
-        StructRefE _ _ ->
-            -- Structured references resolve through the sheet's table definitions, which
-            -- Deps doesn't see; the full recalc keeps their dependents up to date.
-            acc
+        StructRefE tableName selector ->
+            resolvers.table tableName selector ++ acc
 
         SheetRefE _ _ _ ->
             -- Cross-sheet refs are not local precedents; the workbook resolves them.
@@ -69,13 +86,13 @@ precedentsHelp resolveName expr acc =
             acc
 
         Unary _ sub ->
-            precedentsHelp resolveName sub acc
+            precedentsHelp resolvers sub acc
 
         Binary _ a b ->
-            precedentsHelp resolveName a (precedentsHelp resolveName b acc)
+            precedentsHelp resolvers a (precedentsHelp resolvers b acc)
 
         Func _ args ->
-            List.foldl (precedentsHelp resolveName) acc args
+            List.foldl (precedentsHelp resolvers) acc args
 
 
 {-| Topologically sort the given keys using `depsOf` (which must return the precedents of

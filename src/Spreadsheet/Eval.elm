@@ -444,6 +444,7 @@ isArrayForm name =
         , "LINEST", "TREND", "GROWTH"
         , "MAP", "SCAN", "MAKEARRAY", "BYROW", "BYCOL"
         , "TEXTSPLIT", "WRAPROWS", "WRAPCOLS", "EXPAND"
+        , "GROUPBY", "PIVOTBY", "FREQUENCY", "MODE.MULT"
         ]
 
 
@@ -536,6 +537,18 @@ arrayResult ctx name args =
 
         "EXPAND" ->
             expandResult ctx args
+
+        "GROUPBY" ->
+            groupByResult ctx args
+
+        "PIVOTBY" ->
+            pivotByResult ctx args
+
+        "FREQUENCY" ->
+            frequencyResult ctx args
+
+        "MODE.MULT" ->
+            modeMultResult ctx args
 
         _ ->
             Nothing
@@ -1262,6 +1275,229 @@ elemOr pad m i j =
 
         Nothing ->
             pad
+
+
+
+-- GROUPED AGGREGATION & FREQUENCY --------------------------------------------
+
+
+{-| The aggregator named by a GROUPBY/PIVOTBY function argument: either a built-in (passed
+bare, e.g. `SUM`) applied to the group's values as a 1-row matrix, or a `LAMBDA`. -}
+aggregatorOf : Context -> Expr -> (List Value -> Value)
+aggregatorOf ctx fnE =
+    case asLambda fnE of
+        Just lam ->
+            \vs -> applyLambda ctx lam [ Matrix [ vs ] ]
+
+        Nothing ->
+            case fnE of
+                NameE name ->
+                    \vs -> Functions.call name [ Matrix [ vs ] ]
+
+                _ ->
+                    \_ -> VError NameErr
+
+
+{-| `GROUPBY(rowKeys, values, fn)`: group the values by key and aggregate each group,
+spilling a 2-column `[key, result]` block sorted by key. -}
+groupByResult : Context -> List Expr -> Maybe (List (List Value))
+groupByResult ctx args =
+    case args of
+        keysE :: valuesE :: fnE :: _ ->
+            let
+                agg =
+                    aggregatorOf ctx fnE
+
+                pairs =
+                    List.map2 (\k v -> ( k, v )) (List.concat (argMatrix ctx keysE)) (List.concat (argMatrix ctx valuesE))
+            in
+            Just (List.map (\( k, vs ) -> [ k, agg vs ]) (groupValues pairs))
+
+        _ ->
+            Nothing
+
+
+groupValues : List ( Value, Value ) -> List ( Value, List Value )
+groupValues pairs =
+    let
+        grouped =
+            List.foldl
+                (\( k, v ) acc ->
+                    Dict.update (Value.toText k)
+                        (\existing ->
+                            case existing of
+                                Just ( kk, vs ) ->
+                                    Just ( kk, vs ++ [ v ] )
+
+                                Nothing ->
+                                    Just ( k, [ v ] )
+                        )
+                        acc
+                )
+                Dict.empty
+                pairs
+    in
+    List.sortWith (\( a, _ ) ( b, _ ) -> Value.compare a b) (Dict.values grouped)
+
+
+{-| `PIVOTBY(rowKeys, colKeys, values, fn)`: a 2-D crosstab — distinct row keys down the
+side, distinct column keys across the top, each cell the aggregate of the matching values. -}
+pivotByResult : Context -> List Expr -> Maybe (List (List Value))
+pivotByResult ctx args =
+    case args of
+        rowE :: colE :: valE :: fnE :: _ ->
+            let
+                agg =
+                    aggregatorOf ctx fnE
+
+                triples =
+                    List.map3 (\r c v -> ( r, c, v ))
+                        (List.concat (argMatrix ctx rowE))
+                        (List.concat (argMatrix ctx colE))
+                        (List.concat (argMatrix ctx valE))
+
+                rowKeys =
+                    distinctSorted (List.map (\( r, _, _ ) -> r) triples)
+
+                colKeys =
+                    distinctSorted (List.map (\( _, c, _ ) -> c) triples)
+
+                bodyRow rk =
+                    rk
+                        :: List.map
+                            (\ck -> agg (List.filterMap (\( r, c, v ) -> ifMatch r rk c ck v) triples))
+                            colKeys
+            in
+            Just ((VEmpty :: colKeys) :: List.map bodyRow rowKeys)
+
+        _ ->
+            Nothing
+
+
+ifMatch : Value -> Value -> Value -> Value -> Value -> Maybe Value
+ifMatch r rk c ck v =
+    if Value.equalValue r rk && Value.equalValue c ck then
+        Just v
+
+    else
+        Nothing
+
+
+distinctSorted : List Value -> List Value
+distinctSorted vals =
+    List.sortWith Value.compare (dedupValues vals [])
+
+
+dedupValues : List Value -> List Value -> List Value
+dedupValues vals seen =
+    case vals of
+        [] ->
+            List.reverse seen
+
+        v :: rest ->
+            if List.any (Value.equalValue v) seen then
+                dedupValues rest seen
+
+            else
+                dedupValues rest (v :: seen)
+
+
+{-| `FREQUENCY(data, bins)`: count how many data values fall into each bin (and a final
+bucket above the last bin), spilling a column of `bins+1` counts. -}
+frequencyResult : Context -> List Expr -> Maybe (List (List Value))
+frequencyResult ctx args =
+    case args of
+        dataE :: binsE :: _ ->
+            let
+                data =
+                    List.filterMap numOf (List.concat (argMatrix ctx dataE))
+
+                bins =
+                    List.sort (List.filterMap numOf (List.concat (argMatrix ctx binsE)))
+            in
+            Just (List.map (\c -> [ VNumber (toFloat c) ]) (freqCounts data Nothing bins))
+
+        _ ->
+            Nothing
+
+
+freqCounts : List Float -> Maybe Float -> List Float -> List Int
+freqCounts data lower bins =
+    case bins of
+        [] ->
+            [ List.length (List.filter (aboveLower lower) data) ]
+
+        b :: rest ->
+            List.length (List.filter (\v -> aboveLower lower v && v <= b) data) :: freqCounts data (Just b) rest
+
+
+aboveLower : Maybe Float -> Float -> Bool
+aboveLower lower v =
+    case lower of
+        Just lo ->
+            v > lo
+
+        Nothing ->
+            True
+
+
+{-| `MODE.MULT(array)`: every value tied for the most frequent, spilled as a column
+(`#N/A` when no value repeats). -}
+modeMultResult : Context -> List Expr -> Maybe (List (List Value))
+modeMultResult ctx args =
+    case argMatrixAt ctx 0 args of
+        Just m ->
+            let
+                counts =
+                    countFreq (List.filterMap numOf (List.concat m)) []
+
+                maxC =
+                    Maybe.withDefault 0 (List.maximum (List.map Tuple.second counts))
+            in
+            if maxC <= 1 then
+                Just [ [ VError NA ] ]
+
+            else
+                Just (List.filterMap (\( v, c ) -> ifTop c maxC v) counts)
+
+        Nothing ->
+            Nothing
+
+
+ifTop : Int -> Int -> Float -> Maybe (List Value)
+ifTop c maxC v =
+    if c == maxC then
+        Just [ VNumber v ]
+
+    else
+        Nothing
+
+
+countFreq : List Float -> List ( Float, Int ) -> List ( Float, Int )
+countFreq ns acc =
+    case ns of
+        [] ->
+            acc
+
+        v :: rest ->
+            countFreq rest (bumpCount v acc)
+
+
+bumpCount : Float -> List ( Float, Int ) -> List ( Float, Int )
+bumpCount v acc =
+    if List.any (\( x, _ ) -> x == v) acc then
+        List.map
+            (\( x, c ) ->
+                if x == v then
+                    ( x, c + 1 )
+
+                else
+                    ( x, c )
+            )
+            acc
+
+    else
+        acc ++ [ ( v, 1 ) ]
 
 
 
