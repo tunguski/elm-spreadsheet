@@ -32,6 +32,7 @@ import Spreadsheet.Export as Export
 import Spreadsheet.Find as Find
 import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format
+import Spreadsheet.Json as Json
 import Spreadsheet.Parser as Parser
 import Spreadsheet.Pivot as Pivot
 import Spreadsheet.Recalc as Recalc
@@ -108,6 +109,13 @@ suite =
         , textFn2Tests
         , reshapeTests
         , auditTests
+        , groupByTests
+        , dbFnTests
+        , regexTests
+        , statFn3Tests
+        , aggregateTests
+        , jsonTests
+        , depEdgeTests
         ]
 
 
@@ -2610,4 +2618,271 @@ auditTests =
                         sheetWith [ ( "A1", "1" ), ( "C1", "=A1+1" ) ]
                 in
                 Expect.equal [ at "C1" ] (Sheet.traceDependents (at "A1") s)
+        ]
+
+
+-- GROUPED AGGREGATION --------------------------------------------------------
+
+
+groupByTests : Test
+groupByTests =
+    describe "GROUPBY / PIVOTBY"
+        [ test "GROUPBY sums values per key (spills, sorted)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "North" ), ( "A2", "South" ), ( "A3", "North" ), ( "A4", "South" )
+                            , ( "B1", "10" ), ( "B2", "20" ), ( "B3", "30" ), ( "B4", "40" )
+                            , ( "D1", "=GROUPBY(A1:A4,B1:B4,SUM)" )
+                            ]
+                in
+                Expect.equal
+                    ( VText "North", normVal (VNumber 40), VText "South", normVal (VNumber 60) )
+                    ( valOf "D1" s, normVal (valOf "E1" s), valOf "D2" s, normVal (valOf "E2" s) )
+        , test "GROUPBY with a LAMBDA aggregator" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "x" ), ( "A2", "x" ), ( "A3", "y" )
+                            , ( "B1", "2" ), ( "B2", "3" ), ( "B3", "9" )
+                            , ( "D1", "=GROUPBY(A1:A3,B1:B3,LAMBDA(v,MAX(v)))" )
+                            ]
+                in
+                expectVal2 ( VNumber 3, VNumber 9 ) ( valOf "E1" s, valOf "E2" s )
+        , test "PIVOTBY builds a crosstab" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "N" ), ( "A2", "S" ), ( "A3", "N" )
+                            , ( "B1", "a" ), ( "B2", "a" ), ( "B3", "b" )
+                            , ( "C1", "1" ), ( "C2", "2" ), ( "C3", "4" )
+                            , ( "E1", "=PIVOTBY(A1:A3,B1:B3,C1:C3,SUM)" )
+                            ]
+                in
+                -- header row: ["", "a", "b"]; N row: ["N", 1, 4]; S row: ["S", 2, 0]
+                Expect.equal
+                    ( VText "a", normVal (VNumber 1), normVal (VNumber 4) )
+                    ( valOf "F1" s, normVal (valOf "F2" s), normVal (valOf "G2" s) )
+        ]
+
+
+
+-- DATABASE FUNCTIONS ---------------------------------------------------------
+
+
+dbSheet : Sheet
+dbSheet =
+    sheetWith
+        [ ( "A1", "Item" ), ( "B1", "Qty" )
+        , ( "A2", "apple" ), ( "B2", "5" )
+        , ( "A3", "pear" ), ( "B3", "7" )
+        , ( "A4", "apple" ), ( "B4", "3" )
+        , ( "G1", "Item" ), ( "G2", "apple" )
+        ]
+
+
+withDForm : String -> Sheet
+withDForm formula =
+    dbSheet |> Sheet.setRaw (at "D1") formula |> Sheet.recalcAll
+
+
+dbFnTests : Test
+dbFnTests =
+    describe "database functions"
+        [ test "DSUM over matching rows" <|
+            \_ -> expectVal (VNumber 8) (valOf "D1" (withDForm "=DSUM(A1:B4,\"Qty\",G1:G2)"))
+        , test "DCOUNT counts matching numeric cells" <|
+            \_ -> expectVal (VNumber 2) (valOf "D1" (withDForm "=DCOUNT(A1:B4,\"Qty\",G1:G2)"))
+        , test "DAVERAGE averages matching rows" <|
+            \_ -> expectVal (VNumber 4) (valOf "D1" (withDForm "=DAVERAGE(A1:B4,\"Qty\",G1:G2)"))
+        , test "DMAX of matching rows" <|
+            \_ -> expectVal (VNumber 5) (valOf "D1" (withDForm "=DMAX(A1:B4,\"Qty\",G1:G2)"))
+        , test "DGET requires a unique match" <|
+            \_ -> expectVal (VError NumErr) (valOf "D1" (withDForm "=DGET(A1:B4,\"Qty\",G1:G2)"))
+        , test "field by 1-based index" <|
+            \_ -> expectVal (VNumber 8) (valOf "D1" (withDForm "=DSUM(A1:B4,2,G1:G2)"))
+        ]
+
+
+
+-- REGEX ----------------------------------------------------------------------
+
+
+regexTests : Test
+regexTests =
+    describe "regex functions"
+        [ test "REGEXTEST matches a digit run" <|
+            \_ -> Expect.equal ( VBool True, VBool False ) ( ev0 "=REGEXTEST(\"abc123\",\"\\d+\")", ev0 "=REGEXTEST(\"abc\",\"\\d+\")" )
+        , test "REGEXEXTRACT returns the first group" <|
+            \_ -> Expect.equal (VText "42") (ev0 "=REGEXEXTRACT(\"order-42\",\"(\\d+)\")")
+        , test "REGEXEXTRACT with a class and alternation" <|
+            \_ -> Expect.equal ( VText "bar", VBool True ) ( ev0 "=REGEXEXTRACT(\"foo@bar.com\",\"@(\\w+)\")", ev0 "=REGEXTEST(\"cat\",\"cat|dog\")" )
+        , test "REGEXREPLACE replaces all matches" <|
+            \_ -> Expect.equal (VText "a#b#c#") (ev0 "=REGEXREPLACE(\"a1b2c3\",\"\\d\",\"#\")")
+        , test "REGEXREPLACE with backreferences" <|
+            \_ -> Expect.equal (VText "Smith John") (ev0 "=REGEXREPLACE(\"John Smith\",\"(\\w+) (\\w+)\",\"$2 $1\")")
+        , test "case-insensitive flag" <|
+            \_ -> Expect.equal ( VBool False, VBool True ) ( ev0 "=REGEXTEST(\"ABC\",\"abc\")", ev0 "=REGEXTEST(\"ABC\",\"abc\",1)" )
+        , test "anchors" <|
+            \_ -> Expect.equal ( VBool True, VBool False ) ( ev0 "=REGEXTEST(\"hello\",\"^h\")", ev0 "=REGEXTEST(\"hello\",\"^e\")" )
+        , test "character ranges and quantifiers" <|
+            \_ -> Expect.equal (VText "2024") (ev0 "=REGEXEXTRACT(\"y2024m06\",\"([0-9]+)\")")
+        ]
+
+
+
+-- STATISTICAL DEPTH ----------------------------------------------------------
+
+
+statFn3Tests : Test
+statFn3Tests =
+    describe "statistical depth"
+        [ test "FREQUENCY buckets into bins (spills)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "1" ), ( "A2", "3" ), ( "A3", "5" ), ( "A4", "7" )
+                            , ( "B1", "2" ), ( "B2", "4" ), ( "B3", "6" )
+                            , ( "D1", "=FREQUENCY(A1:A4,B1:B3)" )
+                            ]
+                in
+                Expect.equal
+                    ( normVal (VNumber 1), normVal (VNumber 1), normVal (VNumber 1) )
+                    ( normVal (valOf "D1" s), normVal (valOf "D3" s), normVal (valOf "D4" s) )
+        , test "MODE.MULT returns every mode (spills)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "2" ), ( "A4", "3" ), ( "A5", "3" ), ( "A6", "4" ), ( "D1", "=MODE.MULT(A1:A6)" ) ]
+                in
+                expectVal2 ( VNumber 2, VNumber 3 ) ( valOf "D1" s, valOf "D2" s )
+        , test "PERCENTRANK" <|
+            \_ -> expectVal (VNumber 0.5) (ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ), ( "A4", VNumber 4 ), ( "A5", VNumber 5 ) ] "=PERCENTRANK(A1:A5,3)")
+        , test "TRIMMEAN drops the tails" <|
+            \_ ->
+                expectVal (VNumber 5.5)
+                    (ev (List.indexedMap (\i n -> ( "A" ++ String.fromInt (i + 1), VNumber n )) [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]) "=TRIMMEAN(A1:A10,0.2)")
+        , test "STANDARDIZE" <|
+            \_ -> expectVal (VNumber 1) (ev0 "=STANDARDIZE(5,3,2)")
+        , test "COVARIANCE.P" <|
+            \_ ->
+                let
+                    v =
+                        ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ), ( "B1", VNumber 2 ), ( "B2", VNumber 4 ), ( "B3", VNumber 6 ) ] "=COVARIANCE.P(A1:A3,B1:B3)"
+                in
+                case v of
+                    VNumber x ->
+                        Expect.equal True (abs (x - 1.3333333) < 0.001)
+
+                    _ ->
+                        Expect.fail "not a number"
+        ]
+
+
+
+-- AGGREGATE ------------------------------------------------------------------
+
+
+aggregateTests : Test
+aggregateTests =
+    describe "AGGREGATE"
+        [ test "sum (function 9)" <|
+            \_ -> expectVal (VNumber 6) (ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ) ] "=AGGREGATE(9,0,A1:A3)")
+        , test "option 6 ignores errors" <|
+            \_ -> expectVal (VNumber 4) (valOf "D1" (sheetWith [ ( "A1", "1" ), ( "A2", "=1/0" ), ( "A3", "3" ), ( "D1", "=AGGREGATE(9,6,A1:A3)" ) ]))
+        , test "option 0 propagates an error" <|
+            \_ -> expectVal (VError DivZero) (valOf "D1" (sheetWith [ ( "A1", "1" ), ( "A2", "=1/0" ), ( "A3", "3" ), ( "D1", "=AGGREGATE(9,0,A1:A3)" ) ]))
+        , test "max (function 4)" <|
+            \_ -> expectVal (VNumber 3) (ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ) ] "=AGGREGATE(4,0,A1:A3)")
+        , test "LARGE (function 14) with k" <|
+            \_ -> expectVal (VNumber 2) (ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ) ] "=AGGREGATE(14,6,A1:A3,2)")
+        ]
+
+
+
+-- JSON INTEROP ---------------------------------------------------------------
+
+
+jsonTests : Test
+jsonTests =
+    describe "JSON interop"
+        [ test "importObjects lays out a table" <|
+            \_ ->
+                let
+                    s =
+                        Json.importObjects "[{\"name\":\"Ann\",\"qty\":5},{\"name\":\"Bob\",\"qty\":7}]" (at "A1") (Sheet.empty 20 8)
+                in
+                Expect.equal
+                    ( VText "name", VText "Ann", normVal (VNumber 7) )
+                    ( valOf "A1" s, valOf "A2" s, normVal (valOf "B3" s) )
+        , test "importObjects unions keys across objects" <|
+            \_ ->
+                let
+                    s =
+                        Json.importObjects "[{\"a\":1},{\"a\":2,\"b\":3}]" (at "A1") (Sheet.empty 20 8)
+                in
+                Expect.equal ( VText "a", VText "b", normVal (VNumber 3) ) ( valOf "A1" s, valOf "B1" s, normVal (valOf "B3" s) )
+        , test "exportObjects emits array-of-objects" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "name" ), ( "B1", "qty" ), ( "A2", "Ann" ), ( "B2", "5" ) ]
+                in
+                Expect.equal "[{\"name\":\"Ann\",\"qty\":5}]" (Json.exportObjects (rangeOf "A1" "B2") s)
+        , test "import then export round-trips" <|
+            \_ ->
+                let
+                    s =
+                        Json.importObjects "[{\"name\":\"Ann\",\"qty\":5}]" (at "A1") (Sheet.empty 20 8)
+                in
+                Expect.equal "[{\"name\":\"Ann\",\"qty\":5}]" (Json.exportObjects (rangeOf "A1" "B2") s)
+        ]
+
+
+
+-- DEPENDENCY EDGES (structured & spill refs) ---------------------------------
+
+
+depEdgeTests : Test
+depEdgeTests =
+    describe "dependency edges for indirect refs"
+        [ test "a structured reference makes the table cells precedents" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "Qty" ), ( "A2", "5" ), ( "A3", "7" ) ]
+                            |> Sheet.defineTable "SALES" (rangeOf "A1" "A3") False
+                            |> Sheet.setRaw (at "C1") "=SUM(SALES[Qty])"
+                            |> Sheet.recalcAll
+                in
+                Expect.equal True (List.member (at "A2") (Sheet.tracePrecedents (at "C1") s))
+        , test "editing a table cell reaches the structured-ref consumer" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "Qty" ), ( "A2", "5" ), ( "A3", "7" ) ]
+                            |> Sheet.defineTable "SALES" (rangeOf "A1" "A3") False
+                            |> Sheet.setRaw (at "C1") "=SUM(SALES[Qty])"
+                            |> Sheet.recalcAll
+                in
+                Expect.equal True (List.member (at "C1") (Sheet.traceDependents (at "A2") s))
+        , test "a spill reference depends on the spilled block" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=SEQUENCE(3)" ), ( "F1", "=SUM(D1#)" ) ]
+                in
+                Expect.equal True (List.member (at "D3") (Sheet.tracePrecedents (at "F1") s))
+        , test "a spilled cell displays its value (not blank)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=SEQUENCE(3)" ) ]
+                in
+                Expect.equal ( "1", "2", "3" )
+                    ( Sheet.displayString (at "D1") s, Sheet.displayString (at "D2") s, Sheet.displayString (at "D3") s )
         ]
