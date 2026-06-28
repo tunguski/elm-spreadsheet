@@ -1,9 +1,11 @@
 # elm-spreadsheet
 
 A spreadsheet **logic and view layer** in Elm (built for the [elm-lang](../../) compiler).
-It gives you a recalculating cell engine — values, a wide formula function library,
-number formats, and conditional styling — plus a class-styled HTML grid to render it. The
-engine is pure and effect-free, so it is fully unit-tested without a browser.
+It gives you a recalculating cell engine — values, ~120 formula functions, number formats,
+conditional styling, structural editing (insert/delete, copy/paste, autofill), multiple
+sheets with cross-sheet references, and analytics (pivots, dynamic arrays, sparklines) —
+plus a keyboard-driven, class-styled HTML grid to render it. The engine is pure and
+effect-free, so it is fully unit-tested without a browser (290 tests).
 
 ![demo](docs/screenshot.png)
 
@@ -93,7 +95,7 @@ src/Spreadsheet/
   Pivot.elm      group-by + aggregate (pivot tables)
   Spill.elm      dynamic-array transforms (unique/sort/filter/sequence/transpose)
   View.elm       the class-styled HTML grid
-src/Main.elm     a demo app (editing, formula bar, sync/async toggle)
+src/Main.elm     a single-page gallery of ~12 live, editable examples
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
 test/SpreadsheetTest.elm   290 tests
 ```
@@ -125,6 +127,22 @@ cell a =
 
 To render it, hand a `Spreadsheet.View.Config` (viewport size, selection, edit buffer and
 message callbacks) to `Spreadsheet.View.view`.
+
+### Multiple sheets
+
+```elm
+import Spreadsheet.Workbook as Workbook
+
+book =
+    Workbook.init
+        [ ( "Budget", budgetSheet )    -- holds the data
+        , ( "Summary", summarySheet )  -- e.g. B2 = "=SUM(Budget!B2:B4)"
+        ]
+        |> Workbook.recalc             -- settle cross-sheet references to a fixed point
+
+total =
+    Workbook.valueAt "Summary" (cell "B2") book
+```
 
 ### Async recalculation
 
@@ -164,5 +182,13 @@ ELM=../../elm.sh ./test.sh     # → 290 pure-engine tests
   data columns and lets the stationary `SUM` column recompute).
 - `cutPaste` moves cells verbatim and clears the source, but does not update references
   elsewhere that pointed into the moved block.
+- Cross-sheet recalculation is iterated to a fixed point, capped at 25 passes; a genuine
+  *cross-sheet* reference cycle stops at the cap with its last values rather than a
+  `#CIRC!` (within-sheet cycles are still detected and marked).
+- Dynamic arrays are **materialised on demand** (`Spill` + `Sheet.spillInto`) rather than
+  live-recomputing: the result is written as literals once, not re-spilled when its source
+  changes.
+- Sparklines are drawn with plain `div`s (no SVG), so they render on every backend; a bar
+  or dot-line chart rather than a true polyline.
 - `SUBSTITUTE`'s optional instance argument and a few other deep Excel corners are
   documented simplifications.
