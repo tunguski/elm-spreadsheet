@@ -188,7 +188,7 @@ type Msg docMsg
     | Open Id
     | Close
     | Delete Id
-    | CopyDoc Id
+    | Duplicate Id
     | SetSearch String
     | Rename String
     | DocMsg docMsg
@@ -325,7 +325,7 @@ update config backend ctx msg model =
             , Cmd.batch [ backend.delete id, backend.saveIndex metas ]
             )
 
-        CopyDoc id ->
+        Duplicate id ->
             ( model, Random.generate (StartDuplicate id) uuidGenerator )
 
         SetSearch q ->
@@ -809,7 +809,7 @@ metaRow ctx meta =
             ]
         , div [ HA.class "ws-row-actions" ]
             [ iconButton "ws-icon" "Open" "bi-folder2-open" (Open meta.id)
-            , iconButton "ws-icon" "Make a copy" "bi-files" (CopyDoc meta.id)
+            , iconButton "ws-icon" "Make a copy" "bi-files" (Duplicate meta.id)
             , if Permissions.canWrite ctx meta.access then
                 iconButton "ws-icon ws-icon-danger" "Delete" "bi-trash" (Delete meta.id)
 
@@ -941,7 +941,7 @@ editorBar config c ctx model stored writable =
                     text ""
             , queryButton config
             , exportLinks config c model stored table
-            , button [ HA.class "ws-btn", HE.onClick (CopyDoc stored.meta.id) ] [ text "Copy" ]
+            , button [ HA.class "ws-btn", HE.onClick (Duplicate stored.meta.id) ] [ text "Copy" ]
             , if writable then
                 button [ HA.class "ws-btn ws-btn-danger", HE.onClick (Delete stored.meta.id) ] [ text "Delete" ]
 
