@@ -23,9 +23,18 @@ $ELM make "$P/src/Main.elm" --project="$P/elm.json" -o "$P/$OUT/elm-spreadsheet.
 # viewport meta and inline src/spreadsheet.css as a <style> (the library's styling lives there
 # as classes; the page stays a single self-contained HTML file). Idempotent on re-runs.
 HTML="$P/$OUT/elm-spreadsheet.html"
-CSSFILE="$P/src/spreadsheet.css" perl -0pi -e '
+TITLE="elm-spreadsheet" SITECSS="$P/assets/site.css" CSSFILE="$P/src/spreadsheet.css" perl -0pi -e '
   if (index($_, q{name="viewport"}) < 0) {
     s#<meta charset="utf-8">#<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">#;
+  }
+  s#<title>.*?</title>#"<title>".$ENV{TITLE}."</title>"#e;
+  if (index($_, q{bootstrap-icons}) < 0) {
+    s#</head>#<link rel="stylesheet" href="bootstrap-icons-1.11.3.css"></head>#;
+  }
+  if (index($_, q{id="wsite-css"}) < 0) {
+    open(my $f, "<", $ENV{SITECSS}) or die "no site.css: $!";
+    local $/; my $css = <$f>; close($f);
+    s#</head>#"<style id=\"wsite-css\">".$css."</style></head>"#e;
   }
   if (index($_, q{id="ss-app-css"}) < 0) {
     open(my $f, "<", $ENV{CSSFILE}) or die "no spreadsheet.css: $!";
@@ -33,4 +42,7 @@ CSSFILE="$P/src/spreadsheet.css" perl -0pi -e '
     s#</head>#"<style id=\"ss-app-css\">".$css."</style></head>"#e;
   }
 ' "$HTML"
+
+# Bootstrap Icons + the app logo are vendored (no CDN); ship them next to the page.
+cp "$P/assets/bootstrap-icons-1.11.3.css" "$P/assets/bootstrap-icons-1.11.3.woff2" "$P/assets/logo.svg" "$P/$OUT/"
 echo "Done -> $OUT/elm-spreadsheet.html"

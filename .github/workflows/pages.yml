@@ -75,14 +75,22 @@ jobs:
         run: |
           java -jar elm-lang/target/elm.jar make \
             src/Main.elm --project=elm.json -o public/index.html --no-check
-          # The compiler owns the output <head>; add a viewport meta and inline src/spreadsheet.css
-          # as a <style> so the page stays a single self-contained file (idempotent on re-runs).
-          CSSFILE=src/spreadsheet.css perl -0777 -pi -e '
+          # The compiler owns the output <head>; add a viewport meta, the title, the Bootstrap Icons
+          # link, then inline the shared assets/site.css and src/spreadsheet.css so the page stays
+          # self-contained (site.css first, so the app css can override).
+          TITLE=elm-spreadsheet SITECSS=assets/site.css CSSFILE=src/spreadsheet.css perl -0777 -pi -e '
             s#<meta charset="utf-8">#<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">#;
+            s#<title>.*?</title>#"<title>".$ENV{TITLE}."</title>"#e;
+            s#</head>#<link rel="stylesheet" href="bootstrap-icons-1.11.3.css"></head>#;
+            open(my $s, "<", $ENV{SITECSS}) or die "no site.css: $!";
+            local $/; my $scss = <$s>; close($s);
+            s#</head>#"<style id=\"wsite-css\">".$scss."</style></head>"#e;
             open(my $f, "<", $ENV{CSSFILE}) or die "no spreadsheet.css: $!";
-            local $/; my $css = <$f>; close($f);
+            my $css = <$f>; close($f);
             s#</head>#"<style id=\"ss-app-css\">".$css."</style></head>"#e;
           ' public/index.html
+          # Bootstrap Icons + the app logo are vendored (no CDN); ship them alongside the page.
+          cp assets/bootstrap-icons-1.11.3.css assets/bootstrap-icons-1.11.3.woff2 assets/logo.svg public/
           ls -la public
 
       - name: Stamp commit hash + build time into the footer

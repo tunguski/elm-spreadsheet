@@ -19,7 +19,10 @@ assert the value/format/style. The suite spans the whole stack:
 import Dict exposing (Dict)
 import Expect
 import Fuzz
+import Json.Decode as D
+import Json.Encode as E
 import Set
+import SheetDoc
 import Spreadsheet.Analysis as Analysis
 import Spreadsheet.Ast exposing (Expr)
 import Spreadsheet.Chart as Chart
@@ -91,6 +94,7 @@ suite =
         , customFormatTests
         , analysisTests
         , chartTests
+        , sheetDocTests
         ]
 
 
@@ -1985,3 +1989,32 @@ normPts pts =
             Maybe.withDefault x (String.toFloat (String.fromFloat x))
     in
     List.map (\( a, b ) -> ( nf a, nf b )) pts
+
+
+{-| The workspace document adapter: its JSON codec must round-trip the raw cells (and the sheet
+recompute its formulas) so saved spreadsheets reload intact. Also pins the Workspace + Spreadsheet
+co-compilation (a shared constructor name would crash this interpreter). -}
+sheetDocTests : Test
+sheetDocTests =
+    describe "SheetDoc (workspace document)"
+        [ test "codec round-trips raw cells and recomputed formulas" <|
+            \_ ->
+                let
+                    doc =
+                        SheetDoc.config.empty
+
+                    json =
+                        E.encode 0 (SheetDoc.config.codec.encode doc)
+
+                    decoded =
+                        D.decodeString SheetDoc.config.codec.decoder json
+                in
+                case decoded of
+                    Ok d ->
+                        Expect.equal
+                            ( Sheet.rawAt (at "B4") doc.sheet, Sheet.displayString (at "B4") doc.sheet )
+                            ( Sheet.rawAt (at "B4") d.sheet, Sheet.displayString (at "B4") d.sheet )
+
+                    Err e ->
+                        Expect.fail (D.errorToString e)
+        ]
