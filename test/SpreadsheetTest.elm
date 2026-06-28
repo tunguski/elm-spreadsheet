@@ -86,6 +86,7 @@ suite =
         , statsFn2Tests
         , dateFn2Tests
         , dynRefTests
+        , customFormatTests
         ]
 
 
@@ -1866,3 +1867,38 @@ dynRefTests =
 col123 : List ( String, Value )
 col123 =
     [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ) ]
+
+
+
+-- CUSTOM NUMBER FORMATS ------------------------------------------------------
+
+
+customFormatTests : Test
+customFormatTests =
+    describe "custom number formats"
+        [ test "positive section" <|
+            \_ -> Expect.equal "5" (Format.applyTextFormat "0;(0);zero" (VNumber 5))
+        , test "negative section uses its own decoration" <|
+            \_ -> Expect.equal "(5)" (Format.applyTextFormat "0;(0);zero" (VNumber -5))
+        , test "zero section is literal text" <|
+            \_ -> Expect.equal "zero" (Format.applyTextFormat "0;(0);zero" (VNumber 0))
+        , test "literal suffix renders after the number" <|
+            \_ -> Expect.equal "12 kg" (Format.applyTextFormat "0 \"kg\"" (VNumber 12))
+        , test "trailing comma scales by thousands" <|
+            \_ -> Expect.equal "1,235" (Format.applyTextFormat "#,##0," (VNumber 1234567))
+        , test "fraction format" <|
+            \_ -> Expect.equal "2 1/2" (Format.applyTextFormat "# ?/?" (VNumber 2.5))
+        , test "fraction reduces" <|
+            \_ -> Expect.equal "3/4" (Format.applyTextFormat "?/?" (VNumber 0.75))
+        , test "colorOf reads the negative section's colour" <|
+            \_ -> Expect.equal (Just "#d93025") (Format.colorOf "0;[Red](0)" (VNumber -5))
+        , test "colorOf is Nothing for a positive value with no colour" <|
+            \_ -> Expect.equal Nothing (Format.colorOf "0;[Red](0)" (VNumber 5))
+        , test "format-driven colour reaches the rendered cell" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "-5" ) ] |> Sheet.setFormat (at "A1") (Format.Custom "0;[Red](0)")
+                in
+                Expect.equal True (List.member ( "color", "#d93025" ) (Sheet.renderedStyle (at "A1") s).inline)
+        ]

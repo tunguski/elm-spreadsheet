@@ -1477,7 +1477,23 @@ renderedStyle ref sheet =
         base =
             Style.render (effectiveStyle ref sheet) (valueAt ref sheet)
     in
-    { base | inline = base.inline ++ conditionalInline ref sheet }
+    { base | inline = base.inline ++ conditionalInline ref sheet ++ formatColorInline ref sheet }
+
+
+{-| A colour an in-cell number format asks for (e.g. `[Red]` for negatives), emitted inline. -}
+formatColorInline : Ref -> Sheet -> List ( String, String )
+formatColorInline ref sheet =
+    case formatAt ref sheet of
+        Format.Custom code ->
+            case Format.colorOf code (valueAt ref sheet) of
+                Just color ->
+                    [ ( "color", color ) ]
+
+                Nothing ->
+                    []
+
+        _ ->
+            []
 
 
 {-| Inline, data-driven declarations for a cell: colour-scale backgrounds and data-bar

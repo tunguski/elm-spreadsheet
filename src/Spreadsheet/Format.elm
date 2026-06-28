@@ -3,6 +3,7 @@ module Spreadsheet.Format exposing
     , default
     , format
     , applyTextFormat
+    , colorOf
     , describe
     , alignmentClass
     )
@@ -305,17 +306,283 @@ applyTextFormat code value =
         VError e ->
             Value.errorText e
 
-        _ ->
-            if looksLikeDate code then
-                case Value.toNumber value of
-                    Ok serial ->
-                        formatDateCode code (roundFloat serial)
+        VText s ->
+            case sectionAt 3 (String.split ";" code) of
+                Just textSec ->
+                    renderTextSection (stripColors textSec) s
 
-                    Err _ ->
-                        Value.toText value
+                Nothing ->
+                    s
+
+        VBool _ ->
+            Value.toText value
+
+        VEmpty ->
+            ""
+
+        VNumber n ->
+            let
+                ( section, useAbs ) =
+                    pickNumberSection code n
+
+                clean =
+                    stripColors section
+
+                vNum =
+                    if useAbs then
+                        VNumber (abs n)
+
+                    else
+                        VNumber n
+            in
+            if looksLikeDate clean then
+                formatDateCode clean (roundFloat n)
+
+            else if not (String.any isDigitPlaceholder clean) then
+                cleanLiteral clean
+
+            else if String.contains "/" clean then
+                applyFraction clean vNum
 
             else
-                applyNumericCode code value
+                applyNumericCodeScaled clean vNum
+
+
+{-| The colour (`#rrggbb` / name) a format code asks for, given a value — e.g. `[Red]`
+in the section that applies to a negative number. The sheet uses this to tint a cell. -}
+colorOf : String -> Value -> Maybe String
+colorOf code value =
+    let
+        section =
+            case value of
+                VNumber n ->
+                    Tuple.first (pickNumberSection code n)
+
+                VText _ ->
+                    Maybe.withDefault "" (sectionAt 3 (String.split ";" code))
+
+                _ ->
+                    code
+    in
+    bracketColor section
+
+
+{-| Choose the section of a multi-part code (`pos;neg;zero;text`) for a number, and whether
+that section's value should be rendered as an absolute value (true for an explicit negative
+section, which supplies its own sign). -}
+pickNumberSection : String -> Float -> ( String, Bool )
+pickNumberSection code n =
+    let
+        sections =
+            String.split ";" code
+
+        count =
+            List.length sections
+    in
+    if count <= 1 then
+        ( code, False )
+
+    else if n < 0 && count >= 2 then
+        ( sectionOr 1 sections, True )
+
+    else if n == 0 && count >= 3 then
+        ( sectionOr 2 sections, False )
+
+    else
+        ( sectionOr 0 sections, False )
+
+
+sectionAt : Int -> List String -> Maybe String
+sectionAt i sections =
+    List.head (List.drop i sections)
+
+
+sectionOr : Int -> List String -> String
+sectionOr i sections =
+    Maybe.withDefault (Maybe.withDefault "" (List.head sections)) (sectionAt i sections)
+
+
+renderTextSection : String -> String -> String
+renderTextSection section s =
+    String.replace "@" s (String.replace "\"" "" section)
+
+
+{-| Drop bracketed directives like `[Red]` / `[$-409]` from a section. -}
+stripColors : String -> String
+stripColors code =
+    case String.indexes "[" code of
+        i :: _ ->
+            case String.indexes "]" (String.dropLeft i code) of
+                j :: _ ->
+                    stripColors (String.left i code ++ String.dropLeft (i + j + 1) code)
+
+                [] ->
+                    code
+
+        [] ->
+            code
+
+
+bracketColor : String -> Maybe String
+bracketColor code =
+    namedColor (String.toLower code)
+
+
+namedColor : String -> Maybe String
+namedColor lower =
+    if String.contains "[red]" lower then
+        Just "#d93025"
+
+    else if String.contains "[blue]" lower then
+        Just "#1a73e8"
+
+    else if String.contains "[green]" lower then
+        Just "#188038"
+
+    else if String.contains "[magenta]" lower then
+        Just "#a142f4"
+
+    else
+        Nothing
+
+
+{-| Apply trailing-comma scaling (each trailing comma divides by 1000) then the numeric code. -}
+applyNumericCodeScaled : String -> Value -> String
+applyNumericCodeScaled code value =
+    let
+        commas =
+            trailingCommas code
+
+        scaled =
+            case value of
+                VNumber n ->
+                    VNumber (n / (1000 ^ toFloat commas))
+
+                _ ->
+                    value
+    in
+    applyNumericCode (dropTrailingCommas code) scaled
+
+
+trailingCommas : String -> Int
+trailingCommas code =
+    leadingCommas (String.reverse code)
+
+
+leadingCommas : String -> Int
+leadingCommas s =
+    case String.uncons s of
+        Just ( ',', rest ) ->
+            1 + leadingCommas rest
+
+        _ ->
+            0
+
+
+dropTrailingCommas : String -> String
+dropTrailingCommas code =
+    String.reverse (String.dropLeft (trailingCommas code) (String.reverse code))
+
+
+{-| Render a number as a (mixed) fraction, with the maximum denominator implied by the
+count of `?` after the `/` (`# ?/?` → up to 9, `?/??` → up to 99). -}
+applyFraction : String -> Value -> String
+applyFraction code value =
+    case value of
+        VNumber n ->
+            let
+                maxDen =
+                    fractionMaxDen code
+
+                whole =
+                    truncate (abs n)
+
+                ( num, den ) =
+                    bestFraction (abs n - toFloat whole) maxDen
+
+                sign =
+                    if n < 0 then
+                        "-"
+
+                    else
+                        ""
+            in
+            if num == 0 then
+                sign ++ String.fromInt whole
+
+            else if whole == 0 then
+                sign ++ String.fromInt num ++ "/" ++ String.fromInt den
+
+            else
+                sign ++ String.fromInt whole ++ " " ++ String.fromInt num ++ "/" ++ String.fromInt den
+
+        _ ->
+            Value.toText value
+
+
+fractionMaxDen : String -> Int
+fractionMaxDen code =
+    case String.split "/" code of
+        _ :: after :: _ ->
+            let
+                digits =
+                    String.length (String.filter (\c -> c == '?' || c == '0' || c == '#') after)
+            in
+            if digits <= 0 then
+                9
+
+            else
+                10 ^ digits - 1
+
+        _ ->
+            9
+
+
+bestFraction : Float -> Int -> ( Int, Int )
+bestFraction frac maxDen =
+    let
+        ( bn, bd, _ ) =
+            List.foldl
+                (\d ( accN, accD, accErr ) ->
+                    let
+                        nn =
+                            round (frac * toFloat d)
+
+                        err =
+                            abs (frac - toFloat nn / toFloat d)
+                    in
+                    if err < accErr then
+                        ( nn, d, err )
+
+                    else
+                        ( accN, accD, accErr )
+                )
+                ( 0, 1, 2 )
+                (List.range 1 (max 1 maxDen))
+    in
+    reduceFraction bn bd
+
+
+reduceFraction : Int -> Int -> ( Int, Int )
+reduceFraction n d =
+    let
+        g =
+            gcdInt n d
+    in
+    if g == 0 then
+        ( n, d )
+
+    else
+        ( n // g, d // g )
+
+
+gcdInt : Int -> Int -> Int
+gcdInt a b =
+    if b == 0 then
+        abs a
+
+    else
+        gcdInt b (modBy b a)
 
 
 looksLikeDate : String -> Bool
@@ -342,11 +609,50 @@ applyNumericCode code value =
 
         decimals =
             decimalsOf code
-
-        prefix =
-            leadingSymbol code
     in
-    formatFixedNumber decimals thousands percent prefix "" value
+    formatFixedNumber decimals thousands percent (literalPrefix code) (literalSuffix code) value
+
+
+{-| Literal text before the first digit placeholder (a currency symbol, an opening paren,
+a word…), with quotes/backslashes removed. -}
+literalPrefix : String -> String
+literalPrefix code =
+    cleanLiteral (String.fromList (takeWhileNonDigit (String.toList code)))
+
+
+{-| Literal text after the last digit placeholder. -}
+literalSuffix : String -> String
+literalSuffix code =
+    cleanLiteral (String.reverse (String.fromList (takeWhileNonDigit (List.reverse (String.toList code)))))
+
+
+takeWhileNonDigit : List Char -> List Char
+takeWhileNonDigit chars =
+    case chars of
+        c :: rest ->
+            if isNumberToken c then
+                []
+
+            else
+                c :: takeWhileNonDigit rest
+
+        [] ->
+            []
+
+
+isNumberToken : Char -> Bool
+isNumberToken c =
+    c == '#' || c == '0' || c == '?' || c == '.' || c == ',' || c == '%'
+
+
+isDigitPlaceholder : Char -> Bool
+isDigitPlaceholder c =
+    c == '#' || c == '0' || c == '?'
+
+
+cleanLiteral : String -> String
+cleanLiteral s =
+    s |> String.replace "\"" "" |> String.replace "\\" ""
 
 
 decimalsOf : String -> Int
