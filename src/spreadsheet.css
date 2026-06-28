@@ -650,6 +650,24 @@ table.pivot th {
     position: relative;
 }
 
+/* An icon-set conditional-format glyph, shown before the value. */
+.ss-cf-icon {
+    display: inline-block;
+    margin-right: 4px;
+    font-size: 11px;
+    line-height: 1;
+}
+
+/* A cell that a dynamic array spilled into (a non-anchor result cell). */
+.ss-cell.ss-spilled {
+    background: #f3f8ff;
+}
+
+/* The anchor of a live spill: a subtle left accent marks where the array starts. */
+.ss-cell.ss-spill-anchor {
+    box-shadow: inset 2px 0 0 #1a73e8;
+}
+
 /* The dropdown caret shown on a list-validation cell. */
 .ss-dd-caret {
     position: absolute;

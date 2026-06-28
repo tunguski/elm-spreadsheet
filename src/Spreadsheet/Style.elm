@@ -13,6 +13,10 @@ module Spreadsheet.Style exposing
     , RankRule
     , ColorScale
     , DataBar
+    , IconStyle(..)
+    , IconSet
+    , iconLevel
+    , iconView
     , lerpColor
     , dataBarPercent
     , toggleBold
@@ -450,6 +454,56 @@ type alias DataBar =
     { range : Range
     , color : String
     }
+
+
+{-| The visual vocabulary of an icon set: directional arrows, traffic lights, or
+symbols (cross / exclamation / check). -}
+type IconStyle
+    = ThreeArrows
+    | ThreeTrafficLights
+    | ThreeSymbols
+
+
+{-| An icon-set conditional format: each numeric cell in `range` gets a small icon chosen
+by where its value falls against two thresholds — at or below `lowMax` is the low icon,
+at or below `midMax` the middle one, above that the high one. -}
+type alias IconSet =
+    { range : Range
+    , style : IconStyle
+    , lowMax : Float
+    , midMax : Float
+    }
+
+
+{-| Which of the three icons (0 = low, 1 = middle, 2 = high) a value earns. -}
+iconLevel : IconSet -> Float -> Int
+iconLevel set v =
+    if v <= set.lowMax then
+        0
+
+    else if v <= set.midMax then
+        1
+
+    else
+        2
+
+
+{-| The `(glyph, colour)` to draw for a level of an icon style. -}
+iconView : IconStyle -> Int -> ( String, String )
+iconView style level =
+    let
+        pick xs =
+            Maybe.withDefault ( "", "" ) (List.head (List.drop level xs))
+    in
+    case style of
+        ThreeArrows ->
+            pick [ ( "↓", "#d93025" ), ( "→", "#e8710a" ), ( "↑", "#188038" ) ]
+
+        ThreeTrafficLights ->
+            pick [ ( "●", "#d93025" ), ( "●", "#e8710a" ), ( "●", "#188038" ) ]
+
+        ThreeSymbols ->
+            pick [ ( "✕", "#d93025" ), ( "!", "#e8710a" ), ( "✓", "#188038" ) ]
 
 
 {-| Linear interpolation between two `#rrggbb` colours; `t` is clamped to `[0,1]`. -}

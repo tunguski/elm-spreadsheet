@@ -113,6 +113,7 @@ init _ =
             , exWorkbook
             , exSheets
             , exAnalytics
+            , exDynamic
             , exAsync
             ]
       , drag = Nothing
@@ -1417,6 +1418,35 @@ withSparklines sheet =
         )
         sheet
         (List.range 1 6)
+
+
+{-| 13 — dynamic arrays: spilling formulas, a spill reference and an icon set. -}
+exDynamic : Example
+exDynamic =
+    let
+        e =
+            example 13
+                "Dynamic arrays: spilling, A1# & icon sets"
+                "The Source column carries an icon-set conditional format (down / right / up arrows by value). Column C is a single formula, =SORT(A2:A6,1,-1), that spills its sorted result down a block (the spilled cells are tinted; the anchor has a blue edge). Column E nests TAKE inside SORT to spill just the top 3. G2 is =SUM(C2#) — the # operator sums the whole block C spilled, so it stays correct as the source changes. Edit a Source number and watch every dependent block re-spill."
+                8
+                7
+                dynamicSheet
+    in
+    { e | dataRange = rangeOf "A2" "A6" }
+
+
+dynamicSheet : Sheet
+dynamicSheet =
+    build 14 8
+        [ ( "A1", "Source" ), ( "C1", "Sorted ↓ (spill)" ), ( "E1", "Top 3 (spill)" ), ( "G1", "Σ spill" )
+        , ( "A2", "40" ), ( "A3", "15" ), ( "A4", "75" ), ( "A5", "30" ), ( "A6", "60" )
+        , ( "C2", "=SORT(A2:A6,1,-1)" )
+        , ( "E2", "=TAKE(SORT(A2:A6,1,-1),3)" )
+        , ( "G2", "=SUM(C2#)" )
+        ]
+        |> withStyle (cells "A1" "G1") (\s -> { s | bold = True })
+        |> Sheet.addIconSet { range = rangeOf "A2" "A6", style = Style.ThreeArrows, lowMax = 30, midMax = 60 }
+        |> Sheet.recalcAll
 
 
 {-| 12 — async, visible-first recalculation of a large sheet. -}

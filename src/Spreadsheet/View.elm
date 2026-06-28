@@ -403,6 +403,16 @@ displayCell config sheet ref =
 
                   else
                     []
+                , if Sheet.isSpilled ref sheet then
+                    [ "ss-spilled" ]
+
+                  else
+                    []
+                , if Sheet.spillRangeAt ref sheet /= Nothing then
+                    [ "ss-spill-anchor" ]
+
+                  else
+                    []
                 ]
 
         classAttr =
@@ -454,7 +464,8 @@ displayCell config sheet ref =
                     sparkline spark
 
                 Nothing ->
-                    div [ HA.class "ss-cell-content" ] [ text (Sheet.displayString ref sheet) ]
+                    div [ HA.class "ss-cell-content" ]
+                        (iconSpan ref sheet ++ [ text (Sheet.displayString ref sheet) ])
     in
     td
         (classAttr
@@ -463,6 +474,17 @@ displayCell config sheet ref =
             :: (spanAttrs ++ noteAttrs ++ dragAttrs ++ inlineAttrs)
         )
         (content :: indicators)
+
+
+{-| The icon-set glyph for a cell, if any: a small coloured symbol before the value. -}
+iconSpan : Ref -> Sheet -> List (Html msg)
+iconSpan ref sheet =
+    case Sheet.iconAt ref sheet of
+        Just ( glyph, color ) ->
+            [ span [ HA.class "ss-cf-icon", HA.style "color" color ] [ text glyph ] ]
+
+        Nothing ->
+            []
 
 
 {-| A tiny in-cell chart (bars or a dot-line) of a numeric series, drawn with plain divs
