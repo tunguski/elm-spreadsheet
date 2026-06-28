@@ -1,13 +1,15 @@
 # elm-spreadsheet
 
 A spreadsheet **logic and view layer** in Elm (built for the [elm-lang](../../) compiler).
-It gives you a recalculating cell engine — values, ~155 formula functions, number formats,
+It gives you a recalculating cell engine — values, ~170 formula functions, number formats,
 conditional styling, structural editing (insert/delete, copy/paste, autofill), multiple
 sheets with cross-sheet references, what-if analysis (Goal Seek, data tables), live
 **dynamic arrays** that spill (`SORT`/`FILTER`/`SEQUENCE`/`HSTACK`/`LINEST`, the `A1#`
-spill operator, `LET`), and analytics (pivots, sparklines, charts, icon sets) — plus a
-keyboard-driven, class-styled HTML grid to render it. The engine is pure and effect-free,
-so it is fully unit-tested without a browser (363 tests).
+spill operator, `LET`), **functional formulas** (`LAMBDA` + `MAP`/`REDUCE`/`BYROW`, custom
+named functions, array broadcasting), **structured table references** (`Sales[Amount]`),
+and analytics (pivots, sparklines, charts, icon sets) — plus a keyboard-driven,
+class-styled HTML grid to render it. The engine is pure and effect-free, so it is fully
+unit-tested without a browser (395 tests).
 
 ![demo](docs/screenshot.png)
 
@@ -17,7 +19,7 @@ so it is fully unit-tested without a browser (363 tests).
   errors. A hand-written formula parser with Excel/Sheets semantics: operator precedence
   (`-2^2 = 4`, right-associative `^`), `&` concatenation, `%` postfix, `$` absolute refs,
   ranges (`A1:B5`).
-- **~155 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
+- **~170 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
   `SIN`, `GCD`, …), statistics & forecasting (`AVERAGE`, `MEDIAN`, `PERCENTILE`, `RANK`,
   `CORREL`, `SLOPE`, `INTERCEPT`, `FORECAST`, `GEOMEAN`, …), multi-criteria (`SUMIFS`,
   `COUNTIFS`, `AVERAGEIFS`, `MINIFS`/`MAXIFS`), finance (`PMT`, `FV`, `PV`, `NPER`, `NPV`,
@@ -41,6 +43,16 @@ so it is fully unit-tested without a browser (363 tests).
   (edit a source cell and the block re-spills), refuse to overwrite an occupied cell
   (`#SPILL!`), and are addressable as a whole with the **spill operator** `A1#`
   (`=SUM(A1#)`). `LET(name, value, …, calc)` binds locals inside one formula.
+- **Functional formulas.** `LAMBDA(params, body)` plus the higher-order helpers `MAP`,
+  `REDUCE`, `SCAN`, `MAKEARRAY`, `BYROW` and `BYCOL` (e.g. `=MAP(A1:A9, LAMBDA(x, x*x))`).
+  A lambda can be **named** as a reusable custom function (`Sheet.defineLambda "DISCOUNT"
+  "=LAMBDA(p, p*0.9)"` → `=DISCOUNT(B2)`). Operators **broadcast** over arrays, so
+  `=A1:A9*2` and `=A1:A9+B1:B9` evaluate elementwise and spill.
+- **Structured tables.** Define a table over a range (`Sheet.defineTable`) and reference it
+  by column: `Sales[Amount]` (the data column, spills), `Sales[@Qty]` (this row),
+  `Sales[#Headers]`, `Sales[#Data]`, `Sales[#Totals]`, `Sales[#All]`.
+- **Formula auditing.** `ISFORMULA`/`FORMULATEXT` inspect a cell's formula, `ERROR.TYPE`
+  codes an error, and `Sheet.tracePrecedents`/`traceDependents` walk the dependency graph.
 - **Analytics.** **Pivot** a range (group-by + sum/count/avg/min/max); range-aware
   **conditional formatting** (top/bottom-N, above/below average, duplicate/unique) and
   **icon sets** (arrows / traffic lights / symbols by threshold); in-cell **sparklines**;
@@ -93,7 +105,7 @@ src/Spreadsheet/
   Ast.elm        formula syntax tree
   Parser.elm     tokenizer + precedence-climbing parser
   Functions.elm  the built-in function library
-  Eval.elm       evaluator (operators, lazy/reference-aware forms, LET, array spilling)
+  Eval.elm       evaluator (operators, lazy/ref-aware forms, LET, LAMBDA, spilling, tables)
   Deps.elm       precedent extraction + topological sort
   Format.elm     number/date formatting + format-code interpreter
   Style.elm      cell styles, conditional rules, colour scales, data bars
@@ -115,7 +127,7 @@ src/Spreadsheet/
   View.elm       the class-styled HTML grid (+ View.chart)
 src/Main.elm     a single-page gallery of ~12 live, editable examples
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   363 tests
+test/SpreadsheetTest.elm   395 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -182,7 +194,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 363 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 395 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
@@ -208,8 +220,11 @@ ELM=../../elm.sh ./test.sh     # → 363 pure-engine tests
   so editing a source re-spills automatically. The async `Spreadsheet.Recalc` path doesn't
   re-spill mid-stream — spills settle on the next full recalc. (`Spill` + `Sheet.spillInto`
   remain for writing a one-shot array as literals.)
-- A `LET` binding name that happens to look like a cell reference (e.g. `AB12`) is parsed as
-  that reference, not a local; use ordinary names.
+- A `LET`/`LAMBDA` parameter name that happens to look like a cell reference (e.g. `AB12`)
+  is parsed as that reference, not a local; use ordinary names.
+- Structured references and named-lambda bodies don't contribute dependency-graph edges (the
+  evaluator resolves them dynamically), so they rely on a full recalc to refresh — fine for
+  the synchronous engine, which recomputes every formula; not tracked by the async path.
 - Sparklines are drawn with plain `div`s (no SVG), so they render on every backend; a bar
   or dot-line chart rather than a true polyline.
 - `SUBSTITUTE`'s optional instance argument and a few other deep Excel corners are
