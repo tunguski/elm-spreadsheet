@@ -20,6 +20,7 @@ import Dict exposing (Dict)
 import Expect
 import Fuzz
 import Set
+import Spreadsheet.Analysis as Analysis
 import Spreadsheet.Ast exposing (Expr)
 import Spreadsheet.Csv as Csv
 import Spreadsheet.Deps as Deps
@@ -87,6 +88,7 @@ suite =
         , dateFn2Tests
         , dynRefTests
         , customFormatTests
+        , analysisTests
         ]
 
 
@@ -1901,4 +1903,54 @@ customFormatTests =
                         sheetWith [ ( "A1", "-5" ) ] |> Sheet.setFormat (at "A1") (Format.Custom "0;[Red](0)")
                 in
                 Expect.equal True (List.member ( "color", "#d93025" ) (Sheet.renderedStyle (at "A1") s).inline)
+        ]
+
+
+
+-- WHAT-IF ANALYSIS -----------------------------------------------------------
+
+
+analysisTests : Test
+analysisTests =
+    describe "what-if analysis"
+        [ test "goalSeek solves for the input" <|
+            \_ ->
+                let
+                    base =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "=A1*A1" ) ]
+                in
+                case Analysis.goalSeek (at "B1") 16 (at "A1") base of
+                    Just solved ->
+                        Expect.equal (round2 (VNumber 16)) (round2 (valOf "B1" solved))
+
+                    Nothing ->
+                        Expect.fail "goal seek did not converge"
+        , test "goalSeek lands the changing cell near the root" <|
+            \_ ->
+                let
+                    base =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "=A1*A1" ) ]
+                in
+                case Analysis.goalSeek (at "B1") 16 (at "A1") base of
+                    Just solved ->
+                        Expect.equal (round2 (VNumber 4)) (round2 (valOf "A1" solved))
+
+                    Nothing ->
+                        Expect.fail "goal seek did not converge"
+        , test "one-variable data table" <|
+            \_ ->
+                let
+                    base =
+                        sheetWith [ ( "A1", "0" ), ( "B1", "=A1*10" ) ]
+                in
+                Expect.equal (List.map normVal [ VNumber 10, VNumber 20, VNumber 30 ])
+                    (List.map normVal (Analysis.dataTable1 (at "B1") (at "A1") [ 1, 2, 3 ] base))
+        , test "two-variable data table" <|
+            \_ ->
+                let
+                    base =
+                        sheetWith [ ( "A1", "0" ), ( "A2", "0" ), ( "B1", "=A1*A2" ) ]
+                in
+                Expect.equal (List.map (List.map normVal) [ [ VNumber 20, VNumber 40 ], [ VNumber 30, VNumber 60 ] ])
+                    (List.map (List.map normVal) (Analysis.dataTable2 (at "B1") (at "A1") (at "A2") [ 2, 3 ] [ 10, 20 ] base))
         ]

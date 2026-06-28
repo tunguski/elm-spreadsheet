@@ -21,4 +21,4 @@ $ELM test "$P/test/SpreadsheetTest.elm" \
   "$P/src/Spreadsheet/Render.elm" "$P/src/Spreadsheet/Refactor.elm" "$P/src/Spreadsheet/Validation.elm" \
   "$P/src/Spreadsheet/Sheet.elm" "$P/src/Spreadsheet/Recalc.elm" "$P/src/Spreadsheet/Csv.elm" \
   "$P/src/Spreadsheet/Export.elm" "$P/src/Spreadsheet/Find.elm" "$P/src/Spreadsheet/Workbook.elm" \
-  "$P/src/Spreadsheet/Pivot.elm" "$P/src/Spreadsheet/Spill.elm"
+  "$P/src/Spreadsheet/Pivot.elm" "$P/src/Spreadsheet/Spill.elm" "$P/src/Spreadsheet/Analysis.elm"
