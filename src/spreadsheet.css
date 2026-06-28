@@ -55,22 +55,41 @@ body {
 
 .page-head {
     text-align: center;
-    padding: 56px 0 28px;
+    padding: 46px 16px 30px;
+    background: radial-gradient(720px 300px at 50% -40%, rgba(26, 115, 232, 0.16), transparent 70%);
+}
+
+.page-hero-inner {
+    max-width: 720px;
+    margin: 0 auto;
+}
+
+.page-eyebrow {
+    display: inline-block;
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ss-accent);
+    border: 1px solid var(--ss-border);
+    background: #fff;
+    border-radius: 999px;
+    padding: 0.3rem 0.8rem;
+    margin-bottom: 1rem;
 }
 
 .page-head h1 {
-    margin: 0 0 12px;
-    font-size: clamp(2rem, 5vw, 2.9rem);
+    margin: 0 0 0.5rem;
+    font-size: clamp(2rem, 5vw, 3rem);
     letter-spacing: -0.02em;
-    color: var(--ss-accent);
+    color: #1f2733;
 }
 
 .page-lead {
-    max-width: 680px;
+    max-width: 600px;
     margin: 0 auto;
-    color: #4a5160;
-    font-size: 15px;
-    line-height: 1.65;
+    color: #61708a;
+    font-size: 1.05rem;
+    line-height: 1.6;
 }
 
 .gallery {

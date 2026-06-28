@@ -1521,9 +1521,12 @@ appView model =
 header : Html Msg
 header =
     div [ HA.class "page-head" ]
-        [ h1 [] [ text "elm-spreadsheet" ]
-        , p [ HA.class "page-lead" ]
-            [ text "A spreadsheet logic + view layer in Elm — values, ~100 formula functions, number formats, conditional styling, and sync/async recalculation. Every example below is a live, editable spreadsheet: click a cell and use the arrow keys, type to edit, Tab/Enter to move, and drag a column border to resize. They build up from the simplest use to the most involved." ]
+        [ div [ HA.class "page-hero-inner" ]
+            [ span [ HA.class "page-eyebrow" ] [ text "elm · spreadsheet engine" ]
+            , h1 [] [ text "elm-spreadsheet" ]
+            , p [ HA.class "page-lead" ]
+                [ text "A spreadsheet logic + view layer in Elm — values, ~120 formula functions, number formats, conditional styling, multiple sheets and sync/async recalculation. Every example below is a live, editable spreadsheet: click a cell and use the arrow keys, type to edit, Tab/Enter to move, and drag a column border to resize. They build up from the simplest use to the most involved." ]
+            ]
         ]
 
 
