@@ -114,6 +114,7 @@ init _ =
             , exSheets
             , exAnalytics
             , exDynamic
+            , exFunctional
             , exAsync
             ]
       , drag = Nothing
@@ -1446,6 +1447,36 @@ dynamicSheet =
         ]
         |> withStyle (cells "A1" "G1") (\s -> { s | bold = True })
         |> Sheet.addIconSet { range = rangeOf "A2" "A6", style = Style.ThreeArrows, lowMax = 30, midMax = 60 }
+        |> Sheet.recalcAll
+
+
+{-| 14 — functional & structured formulas: a custom function, broadcasting, REDUCE and a
+structured table reference. -}
+exFunctional : Example
+exFunctional =
+    let
+        e =
+            example 14
+                "Functional & structured: LAMBDA, broadcast, tables"
+                "DISCOUNT is a custom function defined once with =LAMBDA(p, p*0.9) and called like a built-in down column C. Column E is one formula, =A2:A4*1.2, that broadcasts the multiply over the whole Price range and spills the result. G2 folds the prices with =REDUCE(0, A2:A4, LAMBDA(a,v,a+v)); G3 sums the same data through a structured table reference, =SUM(PRICES[Price]). Edit a price and all four update."
+                8
+                6
+                functionalSheet
+    in
+    { e | dataRange = rangeOf "A2" "A4" }
+
+
+functionalSheet : Sheet
+functionalSheet =
+    build 16 8
+        [ ( "A1", "Price" ), ( "A2", "100" ), ( "A3", "250" ), ( "A4", "80" )
+        , ( "C1", "DISCOUNT() fn" ), ( "C2", "=DISCOUNT(A2)" ), ( "C3", "=DISCOUNT(A3)" ), ( "C4", "=DISCOUNT(A4)" )
+        , ( "E1", "Price x1.2 (broadcast)" ), ( "E2", "=A2:A4*1.2" )
+        , ( "G1", "Totals" ), ( "G2", "=REDUCE(0,A2:A4,LAMBDA(a,v,a+v))" ), ( "G3", "=SUM(PRICES[Price])" )
+        ]
+        |> withStyle (cells "A1" "G1") (\s -> { s | bold = True })
+        |> Sheet.defineLambda "DISCOUNT" "=LAMBDA(p,p*0.9)"
+        |> Sheet.defineTable "PRICES" (rangeOf "A1" "A4") False
         |> Sheet.recalcAll
 
 
