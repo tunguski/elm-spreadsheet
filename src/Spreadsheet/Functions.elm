@@ -21,6 +21,7 @@ Arguments arrive as `Arg`, which preserves whether each came from a single value
 
 -}
 
+import Spreadsheet.Regex as Regex
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
 
 
@@ -117,6 +118,15 @@ knownNames =
 
     -- functional / structured / audit
     , "XMATCH", "ERROR.TYPE"
+
+    -- regex
+    , "REGEXTEST", "REGEXEXTRACT", "REGEXREPLACE"
+
+    -- database (criteria-range queries)
+    , "DSUM", "DCOUNT", "DCOUNTA", "DAVERAGE", "DMAX", "DMIN", "DGET", "DPRODUCT"
+
+    -- statistics & aggregation
+    , "AGGREGATE", "PERCENTRANK", "TRIMMEAN", "COVARIANCE.P", "STANDARDIZE"
 
     -- lookup / reference
     , "VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "CHOOSE", "ROWS", "COLUMNS"
@@ -441,6 +451,91 @@ call name args =
 
                 [ _ ] ->
                     VError NA
+
+                _ ->
+                    VError ValueErr
+
+        -- Regex --------------------------------------------------------------
+        "REGEXTEST" ->
+            case vals of
+                text :: pat :: rest ->
+                    VBool (Regex.test (icFlag rest 0) (Value.toText pat) (Value.toText text))
+
+                _ ->
+                    VError ValueErr
+
+        "REGEXEXTRACT" ->
+            case vals of
+                text :: pat :: rest ->
+                    case Regex.extract (icFlag rest 0) (Value.toText pat) (Value.toText text) of
+                        Just s ->
+                            VText s
+
+                        Nothing ->
+                            VError NA
+
+                _ ->
+                    VError ValueErr
+
+        "REGEXREPLACE" ->
+            case vals of
+                text :: pat :: repl :: rest ->
+                    VText (Regex.replace (icFlag rest 0) (Value.toText pat) (Value.toText repl) (Value.toText text))
+
+                _ ->
+                    VError ValueErr
+
+        -- Database functions -------------------------------------------------
+        "DSUM" ->
+            dQuery (\xs -> VNumber (List.sum (numbersOnly xs))) args
+
+        "DPRODUCT" ->
+            dQuery (\xs -> VNumber (List.foldl (*) 1 (numbersOnly xs))) args
+
+        "DCOUNT" ->
+            dQuery (\xs -> VNumber (toFloat (List.length (numbersOnly xs)))) args
+
+        "DCOUNTA" ->
+            dQuery (\xs -> VNumber (toFloat (List.length (List.filter (\v -> v /= VEmpty) xs)))) args
+
+        "DAVERAGE" ->
+            dQuery dAverage args
+
+        "DMAX" ->
+            dQuery (dExtreme List.maximum) args
+
+        "DMIN" ->
+            dQuery (dExtreme List.minimum) args
+
+        "DGET" ->
+            dQuery dGet args
+
+        -- Aggregation & statistics -------------------------------------------
+        "AGGREGATE" ->
+            aggregateFn args
+
+        "PERCENTRANK" ->
+            percentRankFn args
+
+        "TRIMMEAN" ->
+            trimMeanFn args
+
+        "COVARIANCE.P" ->
+            covarianceFn args
+
+        "STANDARDIZE" ->
+            case vals of
+                [ x, m, sd ] ->
+                    case ( Value.toNumber x, Value.toNumber m, Value.toNumber sd ) of
+                        ( Ok xv, Ok mv, Ok sdv ) ->
+                            if sdv == 0 then
+                                VError DivZero
+
+                            else
+                                VNumber ((xv - mv) / sdv)
+
+                        _ ->
+                            VError ValueErr
 
                 _ ->
                     VError ValueErr
@@ -3657,3 +3752,383 @@ colLettersHelp n acc =
 
     else
         colLettersHelp next (letter ++ acc)
+
+
+-- REGEX / DATABASE / AGGREGATION HELPERS --------------------------------------
+
+
+{-| Read a case-insensitivity flag (1 = ignore case) from the optional trailing args. -}
+icFlag : List Value -> Int -> Bool
+icFlag vals i =
+    case List.head (List.drop i vals) of
+        Just v ->
+            case Value.toNumber v of
+                Ok n ->
+                    round n == 1
+
+                Err _ ->
+                    False
+
+        Nothing ->
+            False
+
+
+sameTextF : String -> String -> Bool
+sameTextF a b =
+    String.toUpper (String.trim a) == String.toUpper (String.trim b)
+
+
+findIndexBy : (a -> Bool) -> List a -> Maybe Int
+findIndexBy pred xs =
+    findIndexHelp 0 pred xs
+
+
+findIndexHelp : Int -> (a -> Bool) -> List a -> Maybe Int
+findIndexHelp i pred xs =
+    case xs of
+        [] ->
+            Nothing
+
+        y :: rest ->
+            if pred y then
+                Just i
+
+            else
+                findIndexHelp (i + 1) pred rest
+
+
+{-| Run a database query: `DSUM(database, field, criteria)` and friends. `database` is a
+range whose first row is the field headers; `field` selects the column to aggregate (by
+header text or 1-based index); `criteria` is a range whose first row is field names and
+whose remaining rows are criteria (cells in a row AND together, rows OR together). -}
+dQuery : (List Value -> Value) -> List Arg -> Value
+dQuery combine args =
+    case args of
+        dbArg :: fieldArg :: critArg :: _ ->
+            let
+                db =
+                    matrixOf dbArg
+
+                crit =
+                    matrixOf critArg
+            in
+            case dbColumn db (firstValue fieldArg) of
+                Just colIdx ->
+                    combine (List.map (nthValue colIdx) (dbMatchingRows db crit))
+
+                Nothing ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+dbColumn : List (List Value) -> Value -> Maybe Int
+dbColumn db field =
+    case db of
+        headers :: _ ->
+            case field of
+                VNumber n ->
+                    let
+                        i =
+                            round n - 1
+                    in
+                    if i >= 0 && i < List.length headers then
+                        Just i
+
+                    else
+                        Nothing
+
+                _ ->
+                    findIndexBy (\h -> sameTextF (Value.toText h) (Value.toText field)) headers
+
+        [] ->
+            Nothing
+
+
+dbMatchingRows : List (List Value) -> List (List Value) -> List (List Value)
+dbMatchingRows db criteria =
+    case ( db, criteria ) of
+        ( dbHeaders :: dbRows, critHeaders :: critRows ) ->
+            List.filter (\row -> dbRowMatches dbHeaders row critHeaders critRows) dbRows
+
+        _ ->
+            []
+
+
+dbRowMatches : List Value -> List Value -> List Value -> List (List Value) -> Bool
+dbRowMatches dbHeaders row critHeaders critRows =
+    if List.isEmpty critRows then
+        True
+
+    else
+        List.any (\cr -> dbCritRowMatches dbHeaders row critHeaders cr) critRows
+
+
+dbCritRowMatches : List Value -> List Value -> List Value -> List Value -> Bool
+dbCritRowMatches dbHeaders row critHeaders cr =
+    List.all identity
+        (List.map2 (\ch cv -> dbCellMatches dbHeaders row (Value.toText ch) cv) critHeaders cr)
+
+
+dbCellMatches : List Value -> List Value -> String -> Value -> Bool
+dbCellMatches dbHeaders row fieldName cv =
+    if Value.toText cv == "" then
+        True
+
+    else
+        case findIndexBy (\h -> sameTextF (Value.toText h) fieldName) dbHeaders of
+            Just i ->
+                matchCriteria (Value.toText cv) (nthValue i row)
+
+            Nothing ->
+                True
+
+
+dAverage : List Value -> Value
+dAverage xs =
+    case numbersOnly xs of
+        [] ->
+            VError DivZero
+
+        ns ->
+            VNumber (List.sum ns / toFloat (List.length ns))
+
+
+dExtreme : (List Float -> Maybe Float) -> List Value -> Value
+dExtreme f xs =
+    case f (numbersOnly xs) of
+        Just x ->
+            VNumber x
+
+        Nothing ->
+            VError NumErr
+
+
+dGet : List Value -> Value
+dGet xs =
+    case xs of
+        [ v ] ->
+            v
+
+        [] ->
+            VError ValueErr
+
+        _ ->
+            VError NumErr
+
+
+{-| `AGGREGATE(funcNum, options, …)`: dispatch to the aggregate named by `funcNum`,
+optionally ignoring error values (options 2, 3, 6, 7). -}
+aggregateFn : List Arg -> Value
+aggregateFn args =
+    case args of
+        fnArg :: optArg :: dataArgs ->
+            let
+                fnum =
+                    round (Result.withDefault 0 (Value.toNumber (firstValue fnArg)))
+
+                opt =
+                    round (Result.withDefault 0 (Value.toNumber (firstValue optArg)))
+
+                name =
+                    aggregateName fnum
+            in
+            if name == "" then
+                VError ValueErr
+
+            else if List.member opt [ 2, 3, 6, 7 ] then
+                call name (List.map dropErrors dataArgs)
+
+            else
+                case firstErr (flatten dataArgs) of
+                    Just er ->
+                        VError er
+
+                    Nothing ->
+                        call name dataArgs
+
+        _ ->
+            VError ValueErr
+
+
+aggregateName : Int -> String
+aggregateName n =
+    case n of
+        1 ->
+            "AVERAGE"
+
+        2 ->
+            "COUNT"
+
+        3 ->
+            "COUNTA"
+
+        4 ->
+            "MAX"
+
+        5 ->
+            "MIN"
+
+        6 ->
+            "PRODUCT"
+
+        7 ->
+            "STDEV"
+
+        8 ->
+            "STDEVP"
+
+        9 ->
+            "SUM"
+
+        10 ->
+            "VAR"
+
+        11 ->
+            "VARP"
+
+        12 ->
+            "MEDIAN"
+
+        13 ->
+            "MODE"
+
+        14 ->
+            "LARGE"
+
+        15 ->
+            "SMALL"
+
+        16 ->
+            "PERCENTILE"
+
+        17 ->
+            "QUARTILE"
+
+        _ ->
+            ""
+
+
+dropErrors : Arg -> Arg
+dropErrors arg =
+    case arg of
+        Scalar v ->
+            if Value.isError v then
+                Matrix []
+
+            else
+                Scalar v
+
+        Matrix rows ->
+            Matrix (List.map (List.filter (\v -> not (Value.isError v))) rows)
+
+
+percentRankFn : List Arg -> Value
+percentRankFn args =
+    case args of
+        arrArg :: xArg :: _ ->
+            percentRank (List.sort (numbersOnly (flatten [ arrArg ]))) (Result.withDefault 0 (Value.toNumber (firstValue xArg)))
+
+        _ ->
+            VError ValueErr
+
+
+percentRank : List Float -> Float -> Value
+percentRank sorted x =
+    case sorted of
+        [] ->
+            VError NumErr
+
+        _ ->
+            let
+                n =
+                    List.length sorted
+
+                lo =
+                    Maybe.withDefault 0 (List.minimum sorted)
+
+                hi =
+                    Maybe.withDefault 0 (List.maximum sorted)
+            in
+            if n == 1 || x <= lo then
+                VNumber 0
+
+            else if x >= hi then
+                VNumber 1
+
+            else
+                VNumber (interpRank sorted x / toFloat (n - 1))
+
+
+interpRank : List Float -> Float -> Float
+interpRank sorted x =
+    case sorted of
+        a :: b :: rest ->
+            if x >= a && x < b then
+                (x - a) / (b - a)
+
+            else
+                1 + interpRank (b :: rest) x
+
+        _ ->
+            0
+
+
+trimMeanFn : List Arg -> Value
+trimMeanFn args =
+    case args of
+        arrArg :: pctArg :: _ ->
+            let
+                ns =
+                    List.sort (numbersOnly (flatten [ arrArg ]))
+
+                p =
+                    Result.withDefault 0 (Value.toNumber (firstValue pctArg))
+
+                n =
+                    List.length ns
+
+                k =
+                    floor (toFloat n * p / 2)
+
+                trimmed =
+                    List.drop k (List.take (n - k) ns)
+            in
+            case trimmed of
+                [] ->
+                    VError NumErr
+
+                _ ->
+                    VNumber (List.sum trimmed / toFloat (List.length trimmed))
+
+        _ ->
+            VError ValueErr
+
+
+covarianceFn : List Arg -> Value
+covarianceFn args =
+    case args of
+        xArg :: yArg :: _ ->
+            let
+                pairs =
+                    zip (numbersOnly (flatten [ xArg ])) (numbersOnly (flatten [ yArg ]))
+
+                n =
+                    List.length pairs
+            in
+            if n == 0 then
+                VError DivZero
+
+            else
+                let
+                    mx =
+                        List.sum (List.map Tuple.first pairs) / toFloat n
+
+                    my =
+                        List.sum (List.map Tuple.second pairs) / toFloat n
+                in
+                VNumber (List.sum (List.map (\( a, b ) -> (a - mx) * (b - my)) pairs) / toFloat n)
+
+        _ ->
+            VError ValueErr
