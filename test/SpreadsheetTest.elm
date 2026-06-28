@@ -101,6 +101,13 @@ suite =
         , letTests
         , spillRefTests
         , iconSetTests
+        , lambdaTests
+        , namedLambdaTests
+        , broadcastTests
+        , tableTests
+        , textFn2Tests
+        , reshapeTests
+        , auditTests
         ]
 
 
@@ -127,6 +134,10 @@ ctxFrom pairs =
     , external = \_ _ -> VEmpty
     , locals = Eval.noLocals
     , spill = Eval.noSpill
+    , lambda = Eval.noLambda
+    , tableRange = Eval.noTableRange
+    , tableTotals = Eval.noTableTotals
+    , formulaText = Eval.noFormulaText
     }
 
 
@@ -2321,4 +2332,282 @@ iconSetTests =
                             |> Sheet.addIconSet { range = rangeOf "A1" "A3", style = Style.ThreeSymbols, lowMax = 3, midMax = 6 }
                 in
                 Expect.equal ( Nothing, Nothing ) ( Sheet.iconAt (at "B1") s, Sheet.iconAt (at "C9") s )
+        ]
+
+
+-- LAMBDA & HIGHER-ORDER ------------------------------------------------------
+
+
+lambdaTests : Test
+lambdaTests =
+    describe "LAMBDA & higher-order helpers"
+        [ test "MAP applies a lambda elementwise (spills)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=MAP(A1:A3,LAMBDA(x,x*x))" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 9 ) ( valOf "D1" s, valOf "D3" s )
+        , test "MAP over two arrays" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "1" ), ( "A2", "2" ), ( "B1", "10" ), ( "B2", "20" )
+                            , ( "D1", "=MAP(A1:A2,B1:B2,LAMBDA(a,b,a+b))" )
+                            ]
+                in
+                expectVal2 ( VNumber 11, VNumber 22 ) ( valOf "D1" s, valOf "D2" s )
+        , test "REDUCE folds to a scalar" <|
+            \_ ->
+                expectVal (VNumber 6) (valOf "D1" (sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=REDUCE(0,A1:A3,LAMBDA(a,v,a+v))" ) ]))
+        , test "SCAN emits the running accumulator (spills)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=SCAN(0,A1:A3,LAMBDA(a,v,a+v))" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 6 ) ( valOf "D1" s, valOf "D3" s )
+        , test "MAKEARRAY builds a block from indices" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=MAKEARRAY(2,2,LAMBDA(r,c,r*10+c))" ) ]
+                in
+                Expect.equal
+                    ( normVal (VNumber 11), normVal (VNumber 12), normVal (VNumber 22) )
+                    ( normVal (valOf "D1" s), normVal (valOf "E1" s), normVal (valOf "E2" s) )
+        , test "BYROW reduces each row to a column" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "3" ), ( "B2", "4" ), ( "D1", "=BYROW(A1:B2,LAMBDA(r,SUM(r)))" ) ]
+                in
+                expectVal2 ( VNumber 3, VNumber 7 ) ( valOf "D1" s, valOf "D2" s )
+        , test "BYCOL reduces each column to a row" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "3" ), ( "B2", "4" ), ( "D1", "=BYCOL(A1:B2,LAMBDA(c,SUM(c)))" ) ]
+                in
+                expectVal2 ( VNumber 4, VNumber 6 ) ( valOf "D1" s, valOf "E1" s )
+        ]
+
+
+
+-- NAMED LAMBDAS (custom functions) -------------------------------------------
+
+
+namedLambdaTests : Test
+namedLambdaTests =
+    describe "named lambdas (custom functions)"
+        [ test "a defined lambda is callable by name" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "100" ) ]
+                            |> Sheet.defineLambda "DISCOUNT" "=LAMBDA(p,p*0.9)"
+                            |> Sheet.setRaw (at "B1") "=DISCOUNT(A1)"
+                            |> Sheet.recalcAll
+                in
+                expectVal (VNumber 90) (valOf "B1" s)
+        , test "a multi-argument custom function" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith []
+                            |> Sheet.defineLambda "ADD" "=LAMBDA(a,b,a+b)"
+                            |> Sheet.setRaw (at "B1") "=ADD(2,3)"
+                            |> Sheet.recalcAll
+                in
+                expectVal (VNumber 5) (valOf "B1" s)
+        ]
+
+
+
+-- ARRAY BROADCASTING ---------------------------------------------------------
+
+
+broadcastTests : Test
+broadcastTests =
+    describe "array-broadcasting operators"
+        [ test "scalar broadcasts over a range (spills)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=A1:A3*2" ) ]
+                in
+                expectVal2 ( VNumber 2, VNumber 6 ) ( valOf "D1" s, valOf "D3" s )
+        , test "two ranges combine elementwise" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "1" ), ( "A2", "2" ), ( "B1", "10" ), ( "B2", "20" ), ( "D1", "=A1:A2+B1:B2" ) ]
+                in
+                expectVal2 ( VNumber 11, VNumber 22 ) ( valOf "D1" s, valOf "D2" s )
+        , test "a plain scalar expression does not spill" <|
+            \_ -> expectVal (VNumber 6) (valOf "D1" (sheetWith [ ( "D1", "=2*3" ) ]))
+        ]
+
+
+
+-- STRUCTURED TABLE REFERENCES ------------------------------------------------
+
+
+tableFixture : Sheet
+tableFixture =
+    sheetWith
+        [ ( "A1", "Item" ), ( "B1", "Qty" ), ( "A2", "x" ), ( "B2", "5" ), ( "A3", "y" ), ( "B3", "7" ) ]
+        |> Sheet.defineTable "SALES" (rangeOf "A1" "B3") False
+
+
+tableTests : Test
+tableTests =
+    describe "structured table references"
+        [ test "a column aggregates" <|
+            \_ ->
+                let
+                    s =
+                        tableFixture |> Sheet.setRaw (at "D1") "=SUM(SALES[Qty])" |> Sheet.recalcAll
+                in
+                expectVal (VNumber 12) (valOf "D1" s)
+        , test "a column reference spills its data" <|
+            \_ ->
+                let
+                    s =
+                        tableFixture |> Sheet.setRaw (at "D1") "=SALES[Qty]" |> Sheet.recalcAll
+                in
+                expectVal2 ( VNumber 5, VNumber 7 ) ( valOf "D1" s, valOf "D2" s )
+        , test "@ reads this row's cell" <|
+            \_ ->
+                let
+                    s =
+                        tableFixture |> Sheet.setRaw (at "D2") "=SALES[@Qty]" |> Sheet.recalcAll
+                in
+                expectVal (VNumber 5) (valOf "D2" s)
+        , test "#Headers gives the header row" <|
+            \_ ->
+                let
+                    s =
+                        tableFixture |> Sheet.setRaw (at "D1") "=COUNTA(SALES[#Headers])" |> Sheet.recalcAll
+                in
+                expectVal (VNumber 2) (valOf "D1" s)
+        , test "#Totals with a totals row" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "Item" ), ( "B1", "Qty" ), ( "A2", "x" ), ( "B2", "5" ), ( "A3", "y" ), ( "B3", "7" ), ( "A4", "Total" ), ( "B4", "12" ) ]
+                            |> Sheet.defineTable "T" (rangeOf "A1" "B4") True
+                            |> Sheet.setRaw (at "D1") "=SUM(T[#Totals])"
+                            |> Sheet.recalcAll
+                in
+                expectVal (VNumber 12) (valOf "D1" s)
+        ]
+
+
+
+-- MODERN TEXT FUNCTIONS ------------------------------------------------------
+
+
+textFn2Tests : Test
+textFn2Tests =
+    describe "modern text functions"
+        [ test "TEXTSPLIT splits into a row (spills)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=TEXTSPLIT(\"a,b,c\",\",\")" ) ]
+                in
+                Expect.equal ( VText "a", VText "c" ) ( valOf "D1" s, valOf "F1" s )
+        , test "TEXTSPLIT with a row delimiter makes a 2-D block" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=TEXTSPLIT(\"a,b;c,d\",\",\",\";\")" ) ]
+                in
+                Expect.equal ( VText "a", VText "d" ) ( valOf "D1" s, valOf "E2" s )
+        , test "TEXTBEFORE / TEXTAFTER" <|
+            \_ -> Expect.equal ( VText "a", VText "b-c" ) ( ev0 "=TEXTBEFORE(\"a-b-c\",\"-\")", ev0 "=TEXTAFTER(\"a-b-c\",\"-\")" )
+        , test "TEXTBEFORE with an instance count" <|
+            \_ -> Expect.equal (VText "a-b") (ev0 "=TEXTBEFORE(\"a-b-c\",\"-\",2)")
+        , test "ARRAYTOTEXT joins a range" <|
+            \_ -> Expect.equal (VText "1, 2, 3") (valOf "D1" (sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=ARRAYTOTEXT(A1:A3)" ) ]))
+        ]
+
+
+
+-- ARRAY RESHAPING ------------------------------------------------------------
+
+
+reshapeTests : Test
+reshapeTests =
+    describe "array reshaping"
+        [ test "WRAPROWS folds a vector into rows" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=WRAPROWS(SEQUENCE(6),2)" ) ]
+                in
+                Expect.equal
+                    ( normVal (VNumber 1), normVal (VNumber 2), normVal (VNumber 3) )
+                    ( normVal (valOf "D1" s), normVal (valOf "E1" s), normVal (valOf "D2" s) )
+        , test "WRAPCOLS folds a vector into columns" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=WRAPCOLS(SEQUENCE(6),2)" ) ]
+                in
+                Expect.equal
+                    ( normVal (VNumber 1), normVal (VNumber 2), normVal (VNumber 3) )
+                    ( normVal (valOf "D1" s), normVal (valOf "D2" s), normVal (valOf "E1" s) )
+        , test "EXPAND pads to a larger block" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "D1", "=EXPAND(A1:A2,3,2,0)" ) ]
+                in
+                Expect.equal
+                    ( normVal (VNumber 1), normVal (VNumber 0), normVal (VNumber 0) )
+                    ( normVal (valOf "D1" s), normVal (valOf "E1" s), normVal (valOf "D3" s) )
+        , test "XMATCH finds a position" <|
+            \_ -> expectVal (VNumber 2) (ev [ ( "A1", VText "x" ), ( "A2", VText "y" ), ( "A3", VText "z" ) ] "=XMATCH(\"y\",A1:A3)")
+        ]
+
+
+
+-- FORMULA AUDITING -----------------------------------------------------------
+
+
+auditFixture : Sheet
+auditFixture =
+    sheetWith [ ( "A1", "5" ), ( "B1", "=A1*2" ), ( "C1", "=ISFORMULA(B1)" ), ( "D1", "=ISFORMULA(A1)" ), ( "E1", "=FORMULATEXT(B1)" ) ]
+
+
+auditTests : Test
+auditTests =
+    describe "formula auditing"
+        [ test "ISFORMULA distinguishes formulas from literals" <|
+            \_ -> Expect.equal ( VBool True, VBool False ) ( valOf "C1" auditFixture, valOf "D1" auditFixture )
+        , test "FORMULATEXT returns the source" <|
+            \_ -> Expect.equal (VText "=A1*2") (valOf "E1" auditFixture)
+        , test "ERROR.TYPE codes the error" <|
+            \_ -> expectVal2 ( VNumber 7, VNumber 2 ) ( ev0 "=ERROR.TYPE(NA())", ev0 "=ERROR.TYPE(1/0)" )
+        , test "ERROR.TYPE of a non-error is #N/A" <|
+            \_ -> expectVal (VError NA) (ev0 "=ERROR.TYPE(5)")
+        , test "tracePrecedents lists a formula's inputs" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "C1", "=A1+B1" ) ]
+                in
+                Expect.equal [ at "A1", at "B1" ] (List.sortBy (\r -> ( r.row, r.col )) (Sheet.tracePrecedents (at "C1") s))
+        , test "traceDependents lists who reads a cell" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "C1", "=A1+1" ) ]
+                in
+                Expect.equal [ at "C1" ] (Sheet.traceDependents (at "A1") s)
         ]
