@@ -83,6 +83,9 @@ suite =
         , pivotTests
         , condFmtTests
         , spillTests
+        , statsFn2Tests
+        , dateFn2Tests
+        , dynRefTests
         ]
 
 
@@ -1773,3 +1776,93 @@ spillTests =
                 in
                 Expect.equal Nothing (Sheet.spillInto (at "B1") (Spill.sequence 3 1 10 5) occupied)
         ]
+
+
+
+-- STATISTICS & FORECASTING ---------------------------------------------------
+
+
+statsFn2Tests : Test
+statsFn2Tests =
+    describe "statistics & forecasting"
+        [ test "CORREL of perfectly correlated data is 1" <|
+            \_ -> expectVal (VNumber 1) (ev xy "=CORREL(A1:A3,B1:B3)")
+        , test "SLOPE of y = 2x is 2" <|
+            \_ -> expectVal (VNumber 2) (ev xy "=SLOPE(B1:B3,A1:A3)")
+        , test "INTERCEPT of y = 2x is 0" <|
+            \_ -> expectVal (VNumber 0) (ev xy "=INTERCEPT(B1:B3,A1:A3)")
+        , test "RSQ of perfect fit is 1" <|
+            \_ -> expectVal (VNumber 1) (ev xy "=RSQ(B1:B3,A1:A3)")
+        , test "FORECAST extrapolates the line" <|
+            \_ -> expectVal (VNumber 8) (ev xy "=FORECAST(4,B1:B3,A1:A3)")
+        , test "GEOMEAN of 1,2,4 is 2" <|
+            \_ -> expectVal (VNumber 2) (ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 4 ) ] "=GEOMEAN(A1:A3)")
+        , test "HARMEAN of 1,2,4" <|
+            \_ -> Expect.equal (round4 (VNumber 1.7143)) (round4 (ev [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 4 ) ] "=HARMEAN(A1:A3)"))
+        , test "DEVSQ sums squared deviations" <|
+            \_ -> expectVal (VNumber 8) (ev [ ( "A1", VNumber 2 ), ( "A2", VNumber 4 ), ( "A3", VNumber 6 ) ] "=DEVSQ(A1:A3)")
+        ]
+
+
+xy : List ( String, Value )
+xy =
+    [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ), ( "B1", VNumber 2 ), ( "B2", VNumber 4 ), ( "B3", VNumber 6 ) ]
+
+
+
+-- DATE & TIME ----------------------------------------------------------------
+
+
+dateFn2Tests : Test
+dateFn2Tests =
+    describe "date & time functions"
+        [ test "TIME builds a day fraction" <|
+            \_ -> expectVal (VNumber 0.5) (ev0 "=TIME(12,0,0)")
+        , test "HOUR / MINUTE / SECOND read the time" <|
+            \_ -> expectVal2 ( VNumber 13, VNumber 30 ) ( ev0 "=HOUR(TIME(13,30,45))", ev0 "=MINUTE(TIME(13,30,45))" )
+        , test "SECOND reads the seconds" <|
+            \_ -> expectVal (VNumber 45) (ev0 "=SECOND(TIME(13,30,45))")
+        , test "EDATE clamps to the end of a shorter month" <|
+            \_ -> expectVal2 (numPair (ev0 "=EDATE(DATE(2026,1,31),1)") (ev0 "=DATE(2026,2,28)")) ( VBool True, VBool True )
+        , test "EOMONTH returns the last day of the month" <|
+            \_ -> expectVal2 (numPair (ev0 "=EOMONTH(DATE(2026,1,15),0)") (ev0 "=DATE(2026,1,31)")) ( VBool True, VBool True )
+        , test "NETWORKDAYS over any 7-day span is 5" <|
+            \_ -> expectVal (VNumber 5) (ev0 "=NETWORKDAYS(DATE(2026,6,1),DATE(2026,6,7))")
+        , test "WORKDAY lands on a weekday" <|
+            \_ -> expectVal (VNumber 1) (ev0 "=IF(AND(WEEKDAY(WORKDAY(DATE(2026,6,3),1))>1,WEEKDAY(WORKDAY(DATE(2026,6,3),1))<7),1,0)")
+        , test "YEARFRAC of a full year (basis 3) is 1" <|
+            \_ -> expectVal (VNumber 1) (ev0 "=YEARFRAC(DATE(2026,1,1),DATE(2027,1,1),3)")
+        ]
+
+
+{-| `(eq, True)` so two computed serials can be compared without literal-vs-computed noise. -}
+numPair : Value -> Value -> ( Value, Value )
+numPair a b =
+    ( VBool (normVal a == normVal b), VBool True )
+
+
+
+-- DYNAMIC REFERENCES ---------------------------------------------------------
+
+
+dynRefTests : Test
+dynRefTests =
+    describe "dynamic references"
+        [ test "OFFSET reaches another cell" <|
+            \_ -> expectVal (VNumber 3) (ev col123 "=OFFSET(A1,2,0)")
+        , test "OFFSET with height/width yields a range an aggregate reads" <|
+            \_ -> expectVal (VNumber 6) (ev col123 "=SUM(OFFSET(A1,0,0,3,1))")
+        , test "INDIRECT resolves a text address" <|
+            \_ -> expectVal (VNumber 2) (ev col123 "=INDIRECT(\"A2\")")
+        , test "INDIRECT resolves a text range inside SUM" <|
+            \_ -> expectVal (VNumber 6) (ev col123 "=SUM(INDIRECT(\"A1:A3\"))")
+        , test "ADDRESS builds an absolute reference" <|
+            \_ -> expectVal (VText "$C$2") (ev0 "=ADDRESS(2,3)")
+        , test "ADDRESS with abs-num 4 is fully relative" <|
+            \_ -> expectVal (VText "C2") (ev0 "=ADDRESS(2,3,4)")
+        ]
+
+
+col123 : List ( String, Value )
+col123 =
+    [ ( "A1", VNumber 1 ), ( "A2", VNumber 2 ), ( "A3", VNumber 3 ) ]

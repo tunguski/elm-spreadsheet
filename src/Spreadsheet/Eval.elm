@@ -94,7 +94,108 @@ eval ctx expr =
             applyBinary op (eval ctx a) (eval ctx b)
 
         Func name args ->
-            evalFunc ctx name args
+            if isRefForm name then
+                case refFormRange ctx name args of
+                    Just range ->
+                        scalarOfRange ctx range
+
+                    Nothing ->
+                        VError RefErr
+
+            else
+                evalFunc ctx name args
+
+
+{-| `OFFSET`/`INDIRECT` produce *references* at evaluation time rather than plain values,
+so they are resolved here (and in `evalArg`) to a range the surrounding formula reads. -}
+isRefForm : String -> Bool
+isRefForm name =
+    name == "OFFSET" || name == "INDIRECT"
+
+
+refFormRange : Context -> String -> List Expr -> Maybe Range
+refFormRange ctx name args =
+    case name of
+        "OFFSET" ->
+            offsetRange ctx args
+
+        "INDIRECT" ->
+            indirectRange ctx args
+
+        _ ->
+            Nothing
+
+
+offsetRange : Context -> List Expr -> Maybe Range
+offsetRange ctx args =
+    case args of
+        baseE :: rest ->
+            case baseRefOf baseE of
+                Just base ->
+                    let
+                        n =
+                            Ref.normalize base
+
+                        start =
+                            { col = n.start.col + intArg ctx 1 0 rest
+                            , row = n.start.row + intArg ctx 0 0 rest
+                            }
+
+                        height =
+                            intArg ctx 2 (Ref.height n) rest
+
+                        width =
+                            intArg ctx 3 (Ref.width n) rest
+                    in
+                    if start.col < 0 || start.row < 0 then
+                        Nothing
+
+                    else
+                        Just { start = start, end = { col = start.col + width - 1, row = start.row + height - 1 } }
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+baseRefOf : Expr -> Maybe Range
+baseRefOf expr =
+    case expr of
+        RefE ref _ ->
+            Just { start = ref, end = ref }
+
+        RangeE range _ _ ->
+            Just range
+
+        _ ->
+            Nothing
+
+
+intArg : Context -> Int -> Int -> List Expr -> Int
+intArg ctx i default args =
+    case List.head (List.drop i args) of
+        Just e ->
+            case Value.toNumber (eval ctx e) of
+                Ok x ->
+                    round x
+
+                Err _ ->
+                    default
+
+        Nothing ->
+            default
+
+
+indirectRange : Context -> List Expr -> Maybe Range
+indirectRange ctx args =
+    case args of
+        textE :: _ ->
+            Ref.rangeFromA1 (Value.toText (eval ctx textE))
+
+        _ ->
+            Nothing
 
 
 {-| A range used where a scalar is expected collapses to its top-left cell. -}
@@ -163,6 +264,18 @@ evalArg ctx expr =
 
         SheetRangeE sheetName range _ _ ->
             Matrix (List.map (List.map (ctx.external sheetName)) (Ref.rowsOf range))
+
+        Func name fargs ->
+            if isRefForm name then
+                case refFormRange ctx name fargs of
+                    Just range ->
+                        matrixOf ctx range
+
+                    Nothing ->
+                        Scalar (VError RefErr)
+
+            else
+                Scalar (eval ctx expr)
 
         _ ->
             Scalar (eval ctx expr)

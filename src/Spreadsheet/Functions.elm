@@ -126,6 +126,17 @@ knownNames =
     , "SUMPRODUCT", "SUMIFS", "COUNTIFS", "AVERAGEIFS", "MINIFS", "MAXIFS"
     , "SUBTOTAL", "PERCENTILE", "QUARTILE", "RANK", "XLOOKUP"
     , "PMT", "FV", "PV", "NPV", "IRR", "NPER"
+
+    -- statistics & forecasting
+    , "CORREL", "SLOPE", "INTERCEPT", "RSQ", "FORECAST", "GEOMEAN", "HARMEAN"
+    , "DEVSQ"
+
+    -- date & time
+    , "TIME", "HOUR", "MINUTE", "SECOND", "EDATE", "EOMONTH", "WORKDAY"
+    , "NETWORKDAYS", "YEARFRAC"
+
+    -- dynamic references
+    , "OFFSET", "INDIRECT", "ADDRESS"
     ]
 
 
@@ -584,6 +595,63 @@ call name args =
 
         "IRR" ->
             irrFn args
+
+        -- Statistics & forecasting --------------------------------------------
+        "CORREL" ->
+            twoArray correl args
+
+        "RSQ" ->
+            twoArray (\xs ys -> correl xs ys |> Result.map (\r -> r * r)) args
+
+        "SLOPE" ->
+            twoArray slope args
+
+        "INTERCEPT" ->
+            twoArray intercept args
+
+        "FORECAST" ->
+            forecastFn args
+
+        "GEOMEAN" ->
+            statAgg geomean args
+
+        "HARMEAN" ->
+            statAgg harmean args
+
+        "DEVSQ" ->
+            statAgg devsq args
+
+        -- Date & time ---------------------------------------------------------
+        "TIME" ->
+            timeFn args
+
+        "HOUR" ->
+            timePart 24 args
+
+        "MINUTE" ->
+            timePart 1440 args
+
+        "SECOND" ->
+            timePart 86400 args
+
+        "EDATE" ->
+            edateFn 0 args
+
+        "EOMONTH" ->
+            eomonthFn args
+
+        "WORKDAY" ->
+            workdayFn args
+
+        "NETWORKDAYS" ->
+            networkdaysFn args
+
+        "YEARFRAC" ->
+            yearfracFn args
+
+        -- Dynamic references --------------------------------------------------
+        "ADDRESS" ->
+            addressFn args
 
         -- Date ----------------------------------------------------------------
         "DATE" ->
@@ -2930,3 +2998,517 @@ newton f x iter =
                         nx
                     )
                     (iter + 1)
+
+
+
+-- STATISTICS & FORECASTING ---------------------------------------------------
+
+
+{-| Run a two-array statistic over the numeric pairs of two arguments. -}
+twoArray : (List Float -> List Float -> Result Error Float) -> List Arg -> Value
+twoArray f args =
+    case args of
+        a :: b :: _ ->
+            case firstErr (flatten [ a ] ++ flatten [ b ]) of
+                Just e ->
+                    VError e
+
+                Nothing ->
+                    let
+                        ( xs, ys ) =
+                            pairFloats a b
+                    in
+                    if List.length xs < 2 then
+                        VError DivZero
+
+                    else
+                        case f xs ys of
+                            Ok r ->
+                                VNumber r
+
+                            Err e ->
+                                VError e
+
+        _ ->
+            VError ValueErr
+
+
+{-| The aligned numeric pairs of two arguments (positions where both are numbers). -}
+pairFloats : Arg -> Arg -> ( List Float, List Float )
+pairFloats a b =
+    let
+        kept =
+            List.filterMap
+                (\( x, y ) ->
+                    case ( x, y ) of
+                        ( VNumber xn, VNumber yn ) ->
+                            Just ( xn, yn )
+
+                        _ ->
+                            Nothing
+                )
+                (zip (flatten [ a ]) (flatten [ b ]))
+    in
+    ( List.map Tuple.first kept, List.map Tuple.second kept )
+
+
+meanOf : List Float -> Float
+meanOf xs =
+    List.sum xs / toFloat (List.length xs)
+
+
+correl : List Float -> List Float -> Result Error Float
+correl xs ys =
+    let
+        mx =
+            meanOf xs
+
+        my =
+            meanOf ys
+
+        sxy =
+            List.sum (List.map2 (\x y -> (x - mx) * (y - my)) xs ys)
+
+        sxx =
+            List.sum (List.map (\x -> (x - mx) ^ 2) xs)
+
+        syy =
+            List.sum (List.map (\y -> (y - my) ^ 2) ys)
+    in
+    if sxx == 0 || syy == 0 then
+        Err DivZero
+
+    else
+        Ok (sxy / sqrt (sxx * syy))
+
+
+slope : List Float -> List Float -> Result Error Float
+slope ys xs =
+    let
+        mx =
+            meanOf xs
+
+        my =
+            meanOf ys
+
+        sxy =
+            List.sum (List.map2 (\x y -> (x - mx) * (y - my)) xs ys)
+
+        sxx =
+            List.sum (List.map (\x -> (x - mx) ^ 2) xs)
+    in
+    if sxx == 0 then
+        Err DivZero
+
+    else
+        Ok (sxy / sxx)
+
+
+intercept : List Float -> List Float -> Result Error Float
+intercept ys xs =
+    case slope ys xs of
+        Ok m ->
+            Ok (meanOf ys - m * meanOf xs)
+
+        Err e ->
+            Err e
+
+
+forecastFn : List Arg -> Value
+forecastFn args =
+    case args of
+        xArg :: yArg :: xsArg :: _ ->
+            case Value.toNumber (firstValue xArg) of
+                Ok x ->
+                    case firstErr (flatten [ yArg ] ++ flatten [ xsArg ]) of
+                        Just e ->
+                            VError e
+
+                        Nothing ->
+                            let
+                                ( ys, xs ) =
+                                    pairFloats yArg xsArg
+                            in
+                            if List.length xs < 2 then
+                                VError DivZero
+
+                            else
+                                case ( slope ys xs, intercept ys xs ) of
+                                    ( Ok m, Ok b ) ->
+                                        VNumber (m * x + b)
+
+                                    ( Err e, _ ) ->
+                                        VError e
+
+                                    ( _, Err e ) ->
+                                        VError e
+
+                Err e ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+geomean : List Float -> Result Error Float
+geomean nums =
+    case nums of
+        [] ->
+            Err NumErr
+
+        _ ->
+            if List.any (\x -> x <= 0) nums then
+                Err NumErr
+
+            else
+                Ok (List.product nums ^ (1 / toFloat (List.length nums)))
+
+
+harmean : List Float -> Result Error Float
+harmean nums =
+    case nums of
+        [] ->
+            Err DivZero
+
+        _ ->
+            if List.any (\x -> x <= 0) nums then
+                Err NumErr
+
+            else
+                Ok (toFloat (List.length nums) / List.sum (List.map (\x -> 1 / x) nums))
+
+
+devsq : List Float -> Result Error Float
+devsq nums =
+    case nums of
+        [] ->
+            Err NumErr
+
+        _ ->
+            let
+                m =
+                    meanOf nums
+            in
+            Ok (List.sum (List.map (\x -> (x - m) ^ 2) nums))
+
+
+
+-- DATE & TIME ----------------------------------------------------------------
+
+
+timeFn : List Arg -> Value
+timeFn args =
+    case flatten args of
+        [ h, m, s ] ->
+            case ( Value.toNumber h, Value.toNumber m, Value.toNumber s ) of
+                ( Ok hf, Ok mf, Ok sf ) ->
+                    let
+                        frac =
+                            (hf * 3600 + mf * 60 + sf) / 86400
+                    in
+                    VNumber (frac - toFloat (floor frac))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+timePart : Int -> List Arg -> Value
+timePart unit args =
+    case flatten args of
+        [ v ] ->
+            case Value.toNumber v of
+                Ok serial ->
+                    let
+                        frac =
+                            serial - toFloat (floor serial)
+
+                        total =
+                            floor (frac * toFloat unit + 1.0e-9)
+
+                        wrapped =
+                            if unit == 24 then
+                                modBy 24 total
+
+                            else
+                                modBy 60 total
+                    in
+                    VNumber (toFloat wrapped)
+
+                Err e ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+isLeap : Int -> Bool
+isLeap y =
+    (modBy 4 y == 0 && modBy 100 y /= 0) || modBy 400 y == 0
+
+
+lastDay : Int -> Int -> Int
+lastDay y m =
+    if m == 2 then
+        if isLeap y then
+            29
+
+        else
+            28
+
+    else if m == 4 || m == 6 || m == 9 || m == 11 then
+        30
+
+    else
+        31
+
+
+addMonths : Int -> Int -> Int -> ( Int, Int )
+addMonths y m offset =
+    let
+        t =
+            y * 12 + (m - 1) + offset
+    in
+    ( t // 12, modBy 12 t + 1 )
+
+
+edateFn : Int -> List Arg -> Value
+edateFn _ args =
+    case flatten args of
+        start :: months :: _ ->
+            case ( Value.toNumber start, Value.toNumber months ) of
+                ( Ok s, Ok mo ) ->
+                    let
+                        ( y, m, d ) =
+                            serialToDate (round s)
+
+                        ( y2, m2 ) =
+                            addMonths y m (round mo)
+                    in
+                    VNumber (toFloat (dateToSerial y2 m2 (min d (lastDay y2 m2))))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+eomonthFn : List Arg -> Value
+eomonthFn args =
+    case flatten args of
+        start :: months :: _ ->
+            case ( Value.toNumber start, Value.toNumber months ) of
+                ( Ok s, Ok mo ) ->
+                    let
+                        ( y, m, _ ) =
+                            serialToDate (round s)
+
+                        ( y2, m2 ) =
+                            addMonths y m (round mo)
+                    in
+                    VNumber (toFloat (dateToSerial y2 m2 (lastDay y2 m2)))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+{-| Day of week, 1 = Sunday … 7 = Saturday (serial 1 = 1900-01-01, a Monday → 2). -}
+dowSun1 : Int -> Int
+dowSun1 serial =
+    modBy 7 serial + 1
+
+
+isWorkday : List Int -> Int -> Bool
+isWorkday holidays serial =
+    let
+        d =
+            dowSun1 serial
+    in
+    d /= 1 && d /= 7 && not (List.member serial holidays)
+
+
+holidaysOf : List Arg -> List Int
+holidaysOf rest =
+    case rest of
+        h :: _ ->
+            List.map round (numbersOnly (flatten [ h ]))
+
+        [] ->
+            []
+
+
+workdayFn : List Arg -> Value
+workdayFn args =
+    case args of
+        startArg :: daysArg :: rest ->
+            case ( Value.toNumber (firstValue startArg), Value.toNumber (firstValue daysArg) ) of
+                ( Ok s, Ok days ) ->
+                    VNumber (toFloat (stepWork (holidaysOf rest) (round s) (signOf (round days)) (abs (round days))))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+signOf : Int -> Int
+signOf n =
+    if n < 0 then
+        -1
+
+    else
+        1
+
+
+stepWork : List Int -> Int -> Int -> Int -> Int
+stepWork holidays cur dir remaining =
+    if remaining <= 0 then
+        cur
+
+    else
+        let
+            next =
+                cur + dir
+        in
+        if isWorkday holidays next then
+            stepWork holidays next dir (remaining - 1)
+
+        else
+            stepWork holidays next dir remaining
+
+
+networkdaysFn : List Arg -> Value
+networkdaysFn args =
+    case args of
+        startArg :: endArg :: rest ->
+            case ( Value.toNumber (firstValue startArg), Value.toNumber (firstValue endArg) ) of
+                ( Ok a, Ok b ) ->
+                    let
+                        lo =
+                            min (round a) (round b)
+
+                        hi =
+                            max (round a) (round b)
+
+                        count =
+                            List.length (List.filter (isWorkday (holidaysOf rest)) (List.range lo hi))
+                    in
+                    VNumber (toFloat (count * signOf (round b - round a + 1)))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+yearfracFn : List Arg -> Value
+yearfracFn args =
+    case args of
+        startArg :: endArg :: rest ->
+            case ( Value.toNumber (firstValue startArg), Value.toNumber (firstValue endArg) ) of
+                ( Ok a, Ok b ) ->
+                    let
+                        basis =
+                            case rest of
+                                x :: _ ->
+                                    round (Result.withDefault 0 (Value.toNumber (firstValue x)))
+
+                                [] ->
+                                    0
+
+                        days =
+                            abs (b - a)
+
+                        denom =
+                            if basis == 1 then
+                                365.25
+
+                            else if basis == 3 then
+                                365
+
+                            else
+                                360
+                    in
+                    VNumber (days / denom)
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+
+-- ADDRESS --------------------------------------------------------------------
+
+
+addressFn : List Arg -> Value
+addressFn args =
+    case flatten args of
+        rowV :: colV :: rest ->
+            case ( Value.toNumber rowV, Value.toNumber colV ) of
+                ( Ok r, Ok c ) ->
+                    let
+                        absnum =
+                            case rest of
+                                a :: _ ->
+                                    round (Result.withDefault 1 (Value.toNumber a))
+
+                                [] ->
+                                    1
+
+                        ( cd, rd ) =
+                            case absnum of
+                                2 ->
+                                    ( "", "$" )
+
+                                3 ->
+                                    ( "$", "" )
+
+                                4 ->
+                                    ( "", "" )
+
+                                _ ->
+                                    ( "$", "$" )
+                    in
+                    VText (cd ++ colLetters (round c - 1) ++ rd ++ String.fromInt (round r))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+{-| 0-based column index to letters (`0 → "A"`, `26 → "AA"`). -}
+colLetters : Int -> String
+colLetters col =
+    if col < 0 then
+        ""
+
+    else
+        colLettersHelp col ""
+
+
+colLettersHelp : Int -> String -> String
+colLettersHelp n acc =
+    let
+        letter =
+            String.fromChar (Char.fromCode (Char.toCode 'A' + modBy 26 n))
+
+        next =
+            n // 26 - 1
+    in
+    if next < 0 then
+        letter ++ acc
+
+    else
+        colLettersHelp next (letter ++ acc)
