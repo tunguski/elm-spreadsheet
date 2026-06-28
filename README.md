@@ -1,11 +1,12 @@
 # elm-spreadsheet
 
 A spreadsheet **logic and view layer** in Elm (built for the [elm-lang](../../) compiler).
-It gives you a recalculating cell engine — values, ~120 formula functions, number formats,
+It gives you a recalculating cell engine — values, ~140 formula functions, number formats,
 conditional styling, structural editing (insert/delete, copy/paste, autofill), multiple
-sheets with cross-sheet references, and analytics (pivots, dynamic arrays, sparklines) —
-plus a keyboard-driven, class-styled HTML grid to render it. The engine is pure and
-effect-free, so it is fully unit-tested without a browser (290 tests).
+sheets with cross-sheet references, what-if analysis (Goal Seek, data tables), and analytics
+(pivots, dynamic arrays, sparklines, charts) — plus a keyboard-driven, class-styled HTML grid
+to render it. The engine is pure and effect-free, so it is fully unit-tested without a browser
+(330 tests).
 
 ![demo](docs/screenshot.png)
 
@@ -15,14 +16,16 @@ effect-free, so it is fully unit-tested without a browser (290 tests).
   errors. A hand-written formula parser with Excel/Sheets semantics: operator precedence
   (`-2^2 = 4`, right-associative `^`), `&` concatenation, `%` postfix, `$` absolute refs,
   ranges (`A1:B5`).
-- **~120 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
-  `SIN`, `GCD`, …), statistics (`AVERAGE`, `MEDIAN`, `STDEV`, `PERCENTILE`, `QUARTILE`,
-  `RANK`, …), multi-criteria (`SUMIFS`, `COUNTIFS`, `AVERAGEIFS`, `MINIFS`/`MAXIFS`),
-  finance (`PMT`, `FV`, `PV`, `NPER`, `NPV`, `IRR`), logical (`IF`, `IFS`, `SWITCH`, …),
-  text (`LEFT`, `MID`, `SUBSTITUTE`, `TEXTJOIN`, …), lookup (`VLOOKUP`, `HLOOKUP`, `INDEX`,
-  `MATCH`, `XLOOKUP`, `CHOOSE`), `SUMPRODUCT`, `SUBTOTAL`, information (`ISNUMBER`, `TYPE`,
-  …) and date (`DATE`, `YEAR`, `WEEKDAY`, …). Lazy forms (`IF`/`IFERROR`) don't evaluate the
-  untaken branch; aggregates propagate errors and ignore text in ranges, as Excel does.
+- **~140 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
+  `SIN`, `GCD`, …), statistics & forecasting (`AVERAGE`, `MEDIAN`, `PERCENTILE`, `RANK`,
+  `CORREL`, `SLOPE`, `INTERCEPT`, `FORECAST`, `GEOMEAN`, …), multi-criteria (`SUMIFS`,
+  `COUNTIFS`, `AVERAGEIFS`, `MINIFS`/`MAXIFS`), finance (`PMT`, `FV`, `PV`, `NPER`, `NPV`,
+  `IRR`), logical (`IF`, `IFS`, `SWITCH`, …), text (`LEFT`, `MID`, `SUBSTITUTE`, …), lookup
+  & dynamic references (`VLOOKUP`, `INDEX`/`MATCH`, `XLOOKUP`, `OFFSET`, `INDIRECT`,
+  `ADDRESS`), `SUMPRODUCT`, `SUBTOTAL`, information (`ISNUMBER`, `TYPE`, …) and date/time
+  (`DATE`, `EDATE`, `EOMONTH`, `WORKDAY`, `NETWORKDAYS`, `TIME`, `HOUR`, …). Lazy forms
+  (`IF`/`IFERROR`) don't evaluate the untaken branch; aggregates propagate errors and ignore
+  text in ranges, as Excel does.
 - **Multiple sheets.** A `Workbook` of named sheets that reference one another with
   `Data!A1` / `Data!A1:B5` cross-sheet formulas, recomputed to a fixed point so chains
   across sheets settle.
@@ -33,7 +36,13 @@ effect-free, so it is fully unit-tested without a browser (290 tests).
 - **Analytics.** **Pivot** a range (group-by + sum/count/avg/min/max); **dynamic-array**
   transforms (`unique`/`sort`/`filter`/`sequence`/`transpose`) that spill a block
   (`#SPILL!` on collision); range-aware **conditional formatting** (top/bottom-N,
-  above/below average, duplicate/unique); in-cell **sparklines**; and an **auto-filter**.
+  above/below average, duplicate/unique); in-cell **sparklines**; **charts** (column / bar /
+  pie / line, drawn with pure CSS); and an **auto-filter**.
+- **What-if analysis.** **Goal Seek** solves for the input that drives a target cell to a
+  value; one- and two-variable **data tables** tabulate a formula across input ranges.
+- **Custom number formats.** Multi-section codes (`positive;negative;zero;text`), fractions
+  (`# ?/?`), thousands-scaling (trailing commas) and `[Red]`-style colour codes (surfaced as
+  an inline cell colour).
 - **Formatting.** `General`, `Number`, `Currency`, `Percent`, `Scientific`, `DateTime`
   and raw `Custom` Excel-style format codes (`#,##0.00`, `0.0%`, `yyyy-mm-dd`), shared
   with the `TEXT()` function.
@@ -94,10 +103,12 @@ src/Spreadsheet/
   Find.elm       find & replace across cells
   Pivot.elm      group-by + aggregate (pivot tables)
   Spill.elm      dynamic-array transforms (unique/sort/filter/sequence/transpose)
-  View.elm       the class-styled HTML grid
+  Analysis.elm   what-if analysis (Goal Seek, data tables)
+  Chart.elm      chart geometry (column/bar/pie/line)
+  View.elm       the class-styled HTML grid (+ View.chart)
 src/Main.elm     a single-page gallery of ~12 live, editable examples
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   290 tests
+test/SpreadsheetTest.elm   330 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -164,7 +175,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 290 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 330 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
