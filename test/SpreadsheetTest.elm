@@ -95,6 +95,12 @@ suite =
         , analysisTests
         , chartTests
         , sheetDocTests
+        , dynArrayTests
+        , arrayShapeTests
+        , regressionTests
+        , letTests
+        , spillRefTests
+        , iconSetTests
         ]
 
 
@@ -119,6 +125,8 @@ ctxFrom pairs =
     , self = { col = 0, row = 0 }
     , names = \_ -> Nothing
     , external = \_ _ -> VEmpty
+    , locals = Eval.noLocals
+    , spill = Eval.noSpill
     }
 
 
@@ -2017,4 +2025,300 @@ sheetDocTests =
 
                     Err e ->
                         Expect.fail (D.errorToString e)
+        ]
+
+
+-- DYNAMIC ARRAYS (live spilling) ---------------------------------------------
+
+
+{-| The raw Float at a cell (a sentinel if it isn't a number), for tolerance comparisons. -}
+floatAt : String -> Sheet -> Float
+floatAt a1 s =
+    case valOf a1 s of
+        VNumber x ->
+            x
+
+        _ ->
+            -999999
+
+
+rangeOf : String -> String -> Range
+rangeOf a b =
+    { start = at a, end = at b }
+
+
+dynArrayTests : Test
+dynArrayTests =
+    describe "dynamic arrays (live spilling)"
+        [ test "SEQUENCE spills a column" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=SEQUENCE(3)" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 3 ) ( valOf "A1" s, valOf "A3" s )
+        , test "SEQUENCE rows × cols spills a block" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=SEQUENCE(2,2,1,1)" ) ]
+                in
+                expectVal2 ( VNumber 2, VNumber 4 ) ( valOf "B1" s, valOf "B2" s )
+        , test "SORT spills a sorted block" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "3" ), ( "A2", "1" ), ( "A3", "2" ), ( "D1", "=SORT(A1:A3)" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 3 ) ( valOf "D1" s, valOf "D3" s )
+        , test "SORT descending" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=SORT(A1:A3,1,-1)" ) ]
+                in
+                expectVal (VNumber 3) (valOf "D1" s)
+        , test "UNIQUE keeps first occurrences" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "x" ), ( "A2", "y" ), ( "A3", "x" ), ( "A4", "z" ), ( "D1", "=UNIQUE(A1:A4)" ) ]
+                in
+                Expect.equal ( VText "x", VText "y", VText "z" ) ( valOf "D1" s, valOf "D2" s, valOf "D3" s )
+        , test "FILTER keeps masked rows" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "10" ), ( "A2", "20" ), ( "A3", "30" )
+                            , ( "B1", "1" ), ( "B2", "0" ), ( "B3", "1" )
+                            , ( "D1", "=FILTER(A1:A3,B1:B3)" )
+                            ]
+                in
+                expectVal2 ( VNumber 10, VNumber 30 ) ( valOf "D1" s, valOf "D2" s )
+        , test "TRANSPOSE turns a row into a column" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "C1", "3" ), ( "D1", "=TRANSPOSE(A1:C1)" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 3 ) ( valOf "D1" s, valOf "D3" s )
+        , test "SORTBY orders one range by another" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "apple" ), ( "A2", "pear" ), ( "A3", "fig" )
+                            , ( "B1", "3" ), ( "B2", "1" ), ( "B3", "2" )
+                            , ( "D1", "=SORTBY(A1:A3,B1:B3)" )
+                            ]
+                in
+                Expect.equal ( VText "pear", VText "fig", VText "apple" ) ( valOf "D1" s, valOf "D2" s, valOf "D3" s )
+        , test "a spill feeds a plain-range aggregate" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=SEQUENCE(3)" ), ( "F1", "=SUM(D1:D3)" ) ]
+                in
+                expectVal (VNumber 6) (valOf "F1" s)
+        , test "a spill that overruns an occupied cell is #SPILL!" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "3" ), ( "A2", "1" ), ( "A3", "2" ), ( "D1", "=SORT(A1:A3)" ), ( "D2", "blocker" ) ]
+                in
+                expectVal (VError Value.Spill) (valOf "D1" s)
+        , test "editing a spill source re-spills (recalc settles)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "D1", "=SORT(A1:A2,1,-1)" ) ]
+                            |> Sheet.setRaw (at "A2") "9"
+                            |> Sheet.recalcAll
+                in
+                expectVal2 ( VNumber 9, VNumber 1 ) ( valOf "D1" s, valOf "D2" s )
+        ]
+
+
+
+-- ARRAY SHAPING --------------------------------------------------------------
+
+
+arrayShapeTests : Test
+arrayShapeTests =
+    describe "array shaping"
+        [ test "HSTACK joins blocks side by side" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "1" ), ( "A2", "2" ), ( "B1", "3" ), ( "B2", "4" ), ( "D1", "=HSTACK(A1:A2,B1:B2)" ) ]
+                in
+                expectVal2 ( VNumber 3, VNumber 2 ) ( valOf "E1" s, valOf "D2" s )
+        , test "VSTACK stacks blocks vertically" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "B1", "3" ), ( "D1", "=VSTACK(A1:A1,B1:B1)" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 3 ) ( valOf "D1" s, valOf "D2" s )
+        , test "CHOOSECOLS picks a column" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "3" ), ( "B2", "4" ), ( "D1", "=CHOOSECOLS(A1:B2,2)" ) ]
+                in
+                expectVal2 ( VNumber 2, VNumber 4 ) ( valOf "D1" s, valOf "D2" s )
+        , test "CHOOSEROWS picks rows (negative = from end)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "10" ), ( "A2", "20" ), ( "A3", "30" ), ( "D1", "=CHOOSEROWS(A1:A3,-1)" ) ]
+                in
+                expectVal (VNumber 30) (valOf "D1" s)
+        , test "TAKE keeps the first rows" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=TAKE(A1:A3,2)" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 2 ) ( valOf "D1" s, valOf "D2" s )
+        , test "DROP removes the first rows" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "2" ), ( "A3", "3" ), ( "D1", "=DROP(A1:A3,1)" ) ]
+                in
+                expectVal2 ( VNumber 2, VNumber 3 ) ( valOf "D1" s, valOf "D2" s )
+        ]
+
+
+
+-- REGRESSION ARRAYS ----------------------------------------------------------
+
+
+regressionTests : Test
+regressionTests =
+    describe "regression arrays"
+        [ test "LINEST returns slope then intercept" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "2" ), ( "A2", "4" ), ( "A3", "6" )
+                            , ( "B1", "1" ), ( "B2", "2" ), ( "B3", "3" )
+                            , ( "D1", "=LINEST(A1:A3,B1:B3)" )
+                            ]
+                in
+                expectVal2 ( VNumber 2, VNumber 0 ) ( valOf "D1" s, valOf "E1" s )
+        , test "TREND predicts along the fitted line" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "2" ), ( "A2", "4" ), ( "A3", "6" )
+                            , ( "B1", "1" ), ( "B2", "2" ), ( "B3", "3" )
+                            , ( "C1", "4" ), ( "C2", "5" )
+                            , ( "D1", "=TREND(A1:A3,B1:B3,C1:C2)" )
+                            ]
+                in
+                expectVal2 ( VNumber 8, VNumber 10 ) ( valOf "D1" s, valOf "D2" s )
+        , test "GROWTH fits an exponential" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "2" ), ( "A2", "4" ), ( "A3", "8" ), ( "D1", "=GROWTH(A1:A3)" ) ]
+                in
+                Expect.equal True (abs (floatAt "D3" s - 8) < 1.0e-6)
+        ]
+
+
+
+-- LET ------------------------------------------------------------------------
+
+
+letTests : Test
+letTests =
+    describe "LET local bindings"
+        [ test "binds a name and uses it" <|
+            \_ -> expectVal (VNumber 6) (ev0 "=LET(x,5,x+1)")
+        , test "later bindings see earlier ones" <|
+            \_ -> expectVal (VNumber 9) (ev [ ( "A1", VNumber 3 ) ] "=LET(x,A1,y,x*2,x+y)")
+        , test "a local shadows nothing outside its LET" <|
+            \_ -> expectVal (VError NameErr) (ev0 "=x+LET(x,1,x)")
+        , test "LET works inside a sheet recalc" <|
+            \_ -> expectVal (VNumber 100) (valOf "A1" (sheetWith [ ( "A1", "=LET(p,10,p*p)" ) ]))
+        ]
+
+
+
+-- SPILL REFERENCE (A1#) ------------------------------------------------------
+
+
+spillRefTests : Test
+spillRefTests =
+    describe "spill reference A1#"
+        [ test "parses and renders the # operator" <|
+            \_ ->
+                case Parser.parseFormula "=A1#" of
+                    Ok e ->
+                        Expect.equal "=A1#" (Render.formula e)
+
+                    Err msg ->
+                        Expect.fail msg
+        , test "SUM over a spill range" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=SEQUENCE(3)" ), ( "F1", "=SUM(D1#)" ) ]
+                in
+                expectVal (VNumber 6) (valOf "F1" s)
+        , test "a spill reference itself spills" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "D1", "=SEQUENCE(3)" ), ( "H1", "=D1#" ) ]
+                in
+                expectVal2 ( VNumber 1, VNumber 3 ) ( valOf "H1" s, valOf "H3" s )
+        , test "# on a cell with no spill is #REF!" <|
+            \_ ->
+                expectVal (VError RefErr) (valOf "F1" (sheetWith [ ( "A1", "5" ), ( "F1", "=A1#" ) ]))
+        ]
+
+
+
+-- ICON SETS ------------------------------------------------------------------
+
+
+iconSetTests : Test
+iconSetTests =
+    describe "icon-set conditional formatting"
+        [ test "iconLevel buckets by threshold" <|
+            \_ ->
+                let
+                    set =
+                        { range = rangeOf "A1" "A3", style = Style.ThreeArrows, lowMax = 3, midMax = 6 }
+                in
+                Expect.equal ( 0, 1, 2 ) ( Style.iconLevel set 1, Style.iconLevel set 5, Style.iconLevel set 9 )
+        , test "iconView returns glyph and colour" <|
+            \_ -> Expect.equal ( "↑", "#188038" ) (Style.iconView Style.ThreeArrows 2)
+        , test "iconAt picks the cell's icon" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "5" ), ( "A3", "9" ) ]
+                            |> Sheet.addIconSet { range = rangeOf "A1" "A3", style = Style.ThreeArrows, lowMax = 3, midMax = 6 }
+                in
+                Expect.equal
+                    ( Just ( "↓", "#d93025" ), Just ( "↑", "#188038" ) )
+                    ( Sheet.iconAt (at "A1") s, Sheet.iconAt (at "A3") s )
+        , test "iconAt is Nothing off-range or for text" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "hi" ) ]
+                            |> Sheet.addIconSet { range = rangeOf "A1" "A3", style = Style.ThreeSymbols, lowMax = 3, midMax = 6 }
+                in
+                Expect.equal ( Nothing, Nothing ) ( Sheet.iconAt (at "B1") s, Sheet.iconAt (at "C9") s )
         ]
