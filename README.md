@@ -1,15 +1,16 @@
 # elm-spreadsheet
 
 A spreadsheet **logic and view layer** in Elm (built for the [elm-lang](../../) compiler).
-It gives you a recalculating cell engine — values, ~170 formula functions, number formats,
+It gives you a recalculating cell engine — values, ~195 formula functions, number formats,
 conditional styling, structural editing (insert/delete, copy/paste, autofill), multiple
 sheets with cross-sheet references, what-if analysis (Goal Seek, data tables), live
 **dynamic arrays** that spill (`SORT`/`FILTER`/`SEQUENCE`/`HSTACK`/`LINEST`, the `A1#`
 spill operator, `LET`), **functional formulas** (`LAMBDA` + `MAP`/`REDUCE`/`BYROW`, custom
 named functions, array broadcasting), **structured table references** (`Sales[Amount]`),
-and analytics (pivots, sparklines, charts, icon sets) — plus a keyboard-driven,
-class-styled HTML grid to render it. The engine is pure and effect-free, so it is fully
-unit-tested without a browser (395 tests).
+**querying** (`GROUPBY`/`PIVOTBY`, database functions, `REGEX*`, `AGGREGATE`), JSON
+import/export, and analytics (pivots, sparklines, charts, icon sets) — plus a
+keyboard-driven, class-styled HTML grid to render it. The engine is pure and effect-free,
+so it is fully unit-tested without a browser (431 tests).
 
 ![demo](docs/screenshot.png)
 
@@ -19,7 +20,7 @@ unit-tested without a browser (395 tests).
   errors. A hand-written formula parser with Excel/Sheets semantics: operator precedence
   (`-2^2 = 4`, right-associative `^`), `&` concatenation, `%` postfix, `$` absolute refs,
   ranges (`A1:B5`).
-- **~170 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
+- **~195 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
   `SIN`, `GCD`, …), statistics & forecasting (`AVERAGE`, `MEDIAN`, `PERCENTILE`, `RANK`,
   `CORREL`, `SLOPE`, `INTERCEPT`, `FORECAST`, `GEOMEAN`, …), multi-criteria (`SUMIFS`,
   `COUNTIFS`, `AVERAGEIFS`, `MINIFS`/`MAXIFS`), finance (`PMT`, `FV`, `PV`, `NPER`, `NPV`,
@@ -52,7 +53,18 @@ unit-tested without a browser (395 tests).
   by column: `Sales[Amount]` (the data column, spills), `Sales[@Qty]` (this row),
   `Sales[#Headers]`, `Sales[#Data]`, `Sales[#Totals]`, `Sales[#All]`.
 - **Formula auditing.** `ISFORMULA`/`FORMULATEXT` inspect a cell's formula, `ERROR.TYPE`
-  codes an error, and `Sheet.tracePrecedents`/`traceDependents` walk the dependency graph.
+  codes an error, and `Sheet.tracePrecedents`/`traceDependents` walk the dependency graph
+  (structured and spill references contribute real dependency edges).
+- **Querying & aggregation.** `GROUPBY`/`PIVOTBY` group a range and spill a sorted summary
+  or crosstab (any built-in or `LAMBDA` aggregator); **database functions** `DSUM`/`DCOUNT`/
+  `DAVERAGE`/`DMAX`/`DMIN`/`DGET`/… query a table through a criteria range; `AGGREGATE`
+  offers 19 aggregation modes that can ignore error cells; plus `FREQUENCY` and `MODE.MULT`
+  (spilling), `PERCENTRANK`, `TRIMMEAN`, `COVARIANCE.P`, `STANDARDIZE`.
+- **Regular expressions.** A small built-in regex engine backs `REGEXTEST`, `REGEXEXTRACT`
+  (returns the first capture group) and `REGEXREPLACE` (with `$1` backreferences) — classes,
+  ranges, `\d\w\s`, anchors, groups, alternation and a case-insensitivity flag.
+- **JSON interop.** `Spreadsheet.Json.importObjects` lays a JSON array-of-objects out as a
+  table (header row + one row per object); `exportObjects` does the reverse.
 - **Analytics.** **Pivot** a range (group-by + sum/count/avg/min/max); range-aware
   **conditional formatting** (top/bottom-N, above/below average, duplicate/unique) and
   **icon sets** (arrows / traffic lights / symbols by threshold); in-cell **sparklines**;
@@ -122,12 +134,14 @@ src/Spreadsheet/
   Find.elm       find & replace across cells
   Pivot.elm      group-by + aggregate (pivot tables)
   Spill.elm      dynamic-array matrix transforms (unique/sort/filter/sequence/transpose)
+  Regex.elm      a small backtracking regex engine (REGEXTEST/EXTRACT/REPLACE)
+  Json.elm       JSON array-of-objects import/export
   Analysis.elm   what-if analysis (Goal Seek, data tables)
   Chart.elm      chart geometry (column/bar/pie/line)
   View.elm       the class-styled HTML grid (+ View.chart)
 src/Main.elm     a single-page gallery of ~12 live, editable examples
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   395 tests
+test/SpreadsheetTest.elm   431 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -194,7 +208,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 395 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 431 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
