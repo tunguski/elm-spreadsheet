@@ -22,6 +22,7 @@ import Html.Attributes as HA
 import Html.Events as HE
 import Json.Decode
 import Spreadsheet.Export as Export
+import Spreadsheet.Chart as Chart
 import Spreadsheet.Find as Find
 import Spreadsheet.Format as Format exposing (Format)
 import Spreadsheet.Pivot as Pivot
@@ -1381,7 +1382,7 @@ exAnalytics =
         e =
             example 11
                 "Analytics: sparklines, filter, pivot & spill"
-                "A sales grid. The Trend column draws an in-cell sparkline of each rep's three quarters (plain divs, no SVG). The header row is frozen — scroll the grid and it stays. The top 3 totals are highlighted (a range-aware rule). Pick a Region in the filter to hide other rows; the pivot panel below sums totals by region; “Spill unique regions” writes the distinct regions to the right (a #SPILL!-checked dynamic array)."
+                "A sales grid. The Trend column draws an in-cell sparkline of each rep's three quarters (plain divs, no SVG). The header row is frozen — scroll the grid and it stays. The top 3 totals are highlighted (a range-aware rule). Pick a Region in the filter to hide other rows; the pivot panel below sums totals by region; “Spill unique regions” writes the distinct regions to the right (a #SPILL!-checked dynamic array). The charts (a column chart of totals and a region pie) are drawn with pure CSS."
                 8
                 7
                 analyticsSheet
@@ -1570,7 +1571,7 @@ exampleView selecting e =
             , styleNode e.css
             , [ div [ HA.class (gridClass e) ] [ View.view (gridConfig (selecting == Just e.id) e) e.sheet ] ]
             , if e.frozenRows > 0 then
-                [ pivotPanel e ]
+                [ pivotPanel e, chartsPanel e ]
 
               else
                 []
@@ -1696,6 +1697,58 @@ valueText v =
 
         _ ->
             ""
+
+
+{-| A column chart of per-row totals and a pie of the region pivot, for the analytics demo. -}
+chartsPanel : Example -> Html Msg
+chartsPanel e =
+    let
+        n =
+            Ref.normalize e.dataRange
+
+        rows =
+            List.range n.start.row n.end.row
+
+        repLabels =
+            List.map (\r -> Sheet.displayString { col = n.start.col, row = r } e.sheet) rows
+
+        totals =
+            List.map (\r -> cellNumber { col = 5, row = r } e) rows
+
+        pivot =
+            Pivot.pivot { keyCol = e.filterCol, valueCol = 5, agg = Pivot.Sum } e.dataRange e.sheet
+    in
+    div [ HA.class "ss-charts" ]
+        [ View.chart
+            { kind = Chart.Column, title = "Total by rep", labels = repLabels, values = totals, colors = chartPalette }
+        , View.chart
+            { kind = Chart.Pie
+            , title = "Share by " ++ columnTitle e.filterCol e
+            , labels = List.map Tuple.first pivot
+            , values = List.map (\( _, v ) -> numValue v) pivot
+            , colors = chartPalette
+            }
+        ]
+
+
+cellNumber : Ref -> Example -> Float
+cellNumber ref e =
+    numValue (Sheet.valueAt ref e.sheet)
+
+
+numValue : Value -> Float
+numValue v =
+    case v of
+        VNumber x ->
+            x
+
+        _ ->
+            0
+
+
+chartPalette : List String
+chartPalette =
+    [ "#1a73e8", "#188038", "#e8710a", "#a142f4", "#d93025", "#12b5cb" ]
 
 
 gridClass : Example -> String

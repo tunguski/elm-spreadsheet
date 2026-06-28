@@ -22,6 +22,7 @@ import Fuzz
 import Set
 import Spreadsheet.Analysis as Analysis
 import Spreadsheet.Ast exposing (Expr)
+import Spreadsheet.Chart as Chart
 import Spreadsheet.Csv as Csv
 import Spreadsheet.Deps as Deps
 import Spreadsheet.Export as Export
@@ -89,6 +90,7 @@ suite =
         , dynRefTests
         , customFormatTests
         , analysisTests
+        , chartTests
         ]
 
 
@@ -1954,3 +1956,32 @@ analysisTests =
                 Expect.equal (List.map (List.map normVal) [ [ VNumber 20, VNumber 40 ], [ VNumber 30, VNumber 60 ] ])
                     (List.map (List.map normVal) (Analysis.dataTable2 (at "B1") (at "A1") (at "A2") [ 2, 3 ] [ 10, 20 ] base))
         ]
+
+
+
+-- CHARTS ---------------------------------------------------------------------
+
+
+chartTests : Test
+chartTests =
+    describe "chart geometry"
+        [ test "bars are fractions of the maximum" <|
+            \_ -> Expect.equal [ 0.25, 0.5, 1.0 ] (Chart.bars [ 10, 20, 40 ])
+        , test "bars of all-zero are flat" <|
+            \_ -> Expect.equal [ 0, 0 ] (Chart.bars [ 0, 0 ])
+        , test "pie slices are cumulative fractions" <|
+            \_ -> Expect.equal [ ( 0, 0.25 ), ( 0.25, 0.5 ), ( 0.5, 1.0 ) ] (Chart.pieSlices [ 1, 1, 2 ])
+        , test "line points span 0..1 with inverted y" <|
+            \_ -> Expect.equal (normPts [ ( 0, 1 ), ( 1, 0 ) ]) (normPts (Chart.linePoints [ 0, 10 ]))
+        ]
+
+
+{-| Normalise a list of float pairs through a string round-trip (so a literal `1` and a
+computed `1.0` compare equal in this backend). -}
+normPts : List ( Float, Float ) -> List ( Float, Float )
+normPts pts =
+    let
+        nf x =
+            Maybe.withDefault x (String.toFloat (String.fromFloat x))
+    in
+    List.map (\( a, b ) -> ( nf a, nf b )) pts

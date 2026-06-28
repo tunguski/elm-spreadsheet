@@ -720,6 +720,108 @@ th.ss-frozen-col {
     border-radius: 50%;
 }
 
+/* Charts (CSS-only: flex bars, conic-gradient pie, clip-path area). */
+.ss-charts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+.ss-charts .ss-chart {
+    flex: 1 1 240px;
+}
+
+.ss-chart {
+    margin-top: 14px;
+    padding: 14px 16px;
+    border: 1px solid var(--ss-border);
+    border-radius: 10px;
+    background: #fff;
+}
+
+.ss-chart-title {
+    font-weight: 600;
+    color: #3c4043;
+    margin-bottom: 10px;
+}
+
+.ss-chart-cols {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    height: 140px;
+}
+
+.ss-chart-colwrap {
+    flex: 1 1 0;
+    height: 100%;
+    display: flex;
+    align-items: flex-end;
+}
+
+.ss-chart-col {
+    width: 100%;
+    border-radius: 3px 3px 0 0;
+    min-height: 2px;
+}
+
+.ss-chart-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ss-chart-barrow {
+    height: 16px;
+}
+
+.ss-chart-bar {
+    height: 100%;
+    border-radius: 0 3px 3px 0;
+    min-width: 2px;
+}
+
+.ss-chart-pie {
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    margin: 0 auto;
+}
+
+.ss-chart-line {
+    position: relative;
+    height: 140px;
+    background: linear-gradient(#fafbfd, #fafbfd);
+    border-bottom: 1px solid var(--ss-border);
+}
+
+.ss-chart-area {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to bottom, rgba(26, 115, 232, 0.55), rgba(26, 115, 232, 0.10));
+}
+
+.ss-chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 12px;
+    font-size: 12px;
+    color: #5f6368;
+}
+
+.ss-chart-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.ss-chart-swatch {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+}
+
 .ss-cell-content {
     padding: 3px 6px;
     white-space: nowrap;

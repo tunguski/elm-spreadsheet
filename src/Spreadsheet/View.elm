@@ -3,6 +3,7 @@ module Spreadsheet.View exposing
     , KeyEvent
     , rowHeight
     , view
+    , chart
     )
 
 {-| Render a `Sheet` to an interactive HTML grid.
@@ -29,6 +30,7 @@ import Html exposing (Html, div, input, option, select, span, table, tbody, td, 
 import Html.Attributes as HA
 import Html.Events as HE
 import Json.Decode
+import Spreadsheet.Chart as Chart
 import Spreadsheet.Ref as Ref exposing (Range, Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 
@@ -124,6 +126,86 @@ view config sheet =
             , tbody [] bodyRows
             ]
         ]
+
+
+{-| Draw a chart (column / bar / pie / line) of a labelled numeric series, using only CSS
+(flex bars, a `conic-gradient` pie, a `clip-path` area) so it renders without SVG. -}
+chart : { kind : Chart.Kind, title : String, labels : List String, values : List Float, colors : List String } -> Html msg
+chart cfg =
+    div [ HA.class "ss-chart" ]
+        [ div [ HA.class "ss-chart-title" ] [ text cfg.title ]
+        , chartBody cfg
+        , chartLegend cfg
+        ]
+
+
+chartBody : { kind : Chart.Kind, title : String, labels : List String, values : List Float, colors : List String } -> Html msg
+chartBody cfg =
+    case cfg.kind of
+        Chart.Column ->
+            div [ HA.class "ss-chart-cols" ]
+                (List.indexedMap
+                    (\i frac ->
+                        div [ HA.class "ss-chart-colwrap" ]
+                            [ div [ HA.class "ss-chart-col", HA.style "height" (pct (frac * 100)), HA.style "background" (colorAt i cfg.colors) ] [] ]
+                    )
+                    (Chart.bars cfg.values)
+                )
+
+        Chart.Bar ->
+            div [ HA.class "ss-chart-rows" ]
+                (List.indexedMap
+                    (\i frac ->
+                        div [ HA.class "ss-chart-barrow" ]
+                            [ div [ HA.class "ss-chart-bar", HA.style "width" (pct (frac * 100)), HA.style "background" (colorAt i cfg.colors) ] [] ]
+                    )
+                    (Chart.bars cfg.values)
+                )
+
+        Chart.Pie ->
+            let
+                stops =
+                    String.join ", "
+                        (List.indexedMap
+                            (\i ( s, e ) -> colorAt i cfg.colors ++ " " ++ pct (s * 100) ++ " " ++ pct (e * 100))
+                            (Chart.pieSlices cfg.values)
+                        )
+            in
+            div [ HA.class "ss-chart-pie", HA.style "background" ("conic-gradient(" ++ stops ++ ")") ] []
+
+        Chart.Line ->
+            let
+                poly =
+                    "polygon(0% 100%, "
+                        ++ String.join ", " (List.map (\( x, y ) -> pct (x * 100) ++ " " ++ pct (y * 100)) (Chart.linePoints cfg.values))
+                        ++ ", 100% 100%)"
+            in
+            div [ HA.class "ss-chart-line" ]
+                [ div [ HA.class "ss-chart-area", HA.style "clip-path" poly, HA.style "-webkit-clip-path" poly ] [] ]
+
+
+chartLegend : { kind : Chart.Kind, title : String, labels : List String, values : List Float, colors : List String } -> Html msg
+chartLegend cfg =
+    div [ HA.class "ss-chart-legend" ]
+        (List.indexedMap
+            (\i label ->
+                div [ HA.class "ss-chart-key" ]
+                    [ span [ HA.class "ss-chart-swatch", HA.style "background" (colorAt i cfg.colors) ] []
+                    , text label
+                    ]
+            )
+            cfg.labels
+        )
+
+
+colorAt : Int -> List String -> String
+colorAt i colors =
+    case List.head (List.drop (modBy (max 1 (List.length colors)) i) colors) of
+        Just c ->
+            c
+
+        Nothing ->
+            "#1a73e8"
 
 
 {-| A zero-content row that occupies `height` px, standing in for off-screen rows. -}
