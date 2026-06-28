@@ -115,6 +115,7 @@ init _ =
             , exAnalytics
             , exDynamic
             , exFunctional
+            , exQuery
             , exAsync
             ]
       , drag = Nothing
@@ -1477,6 +1478,37 @@ functionalSheet =
         |> withStyle (cells "A1" "G1") (\s -> { s | bold = True })
         |> Sheet.defineLambda "DISCOUNT" "=LAMBDA(p,p*0.9)"
         |> Sheet.defineTable "PRICES" (rangeOf "A1" "A4") False
+        |> Sheet.recalcAll
+
+
+{-| 15 — query & analyze: grouped aggregation, a regex extract and a robust aggregate. -}
+exQuery : Example
+exQuery =
+    let
+        e =
+            example 15
+                "Query & analyze: GROUPBY, regex, AGGREGATE"
+                "E2 is one formula, =GROUPBY(A2:A5, B2:B5, SUM), that groups the sales by region and spills a sorted summary. H2 pulls each e-mail's domain with =REGEXEXTRACT(C2, \"@(\\w+)\") — a small built-in regex engine. J2 is =AGGREGATE(1, 6, B2:B5), an average that would ignore any error cells. Edit a region or a sales number and the grouped block re-spills."
+                10
+                6
+                querySheet
+    in
+    { e | dataRange = rangeOf "A2" "C5" }
+
+
+querySheet : Sheet
+querySheet =
+    build 16 10
+        [ ( "A1", "Region" ), ( "B1", "Sales" ), ( "C1", "Email" )
+        , ( "A2", "West" ), ( "B2", "120" ), ( "C2", "ann@west.io" )
+        , ( "A3", "East" ), ( "B3", "80" ), ( "C3", "bob@east.io" )
+        , ( "A4", "West" ), ( "B4", "150" ), ( "C4", "cy@west.io" )
+        , ( "A5", "East" ), ( "B5", "95" ), ( "C5", "dee@east.io" )
+        , ( "E1", "By region (GROUPBY)" ), ( "E2", "=GROUPBY(A2:A5,B2:B5,SUM)" )
+        , ( "H1", "Domain (regex)" ), ( "H2", "=REGEXEXTRACT(C2,\"@(\\w+)\")" )
+        , ( "J1", "Robust avg" ), ( "J2", "=AGGREGATE(1,6,B2:B5)" )
+        ]
+        |> withStyle (cells "A1" "J1") (\s -> { s | bold = True })
         |> Sheet.recalcAll
 
 
