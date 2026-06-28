@@ -58,6 +58,11 @@ module Spreadsheet.Sheet exposing
     , clearName
     , nameOf
     , definedNames
+    , defineLambda
+    , defineTable
+    , tableOf
+    , tracePrecedents
+    , traceDependents
     , setNote
     , noteAt
     , mergeCells
@@ -158,7 +163,15 @@ type alias Model =
     , iconSets : List Style.IconSet
     , spills : Dict ( Int, Int ) Value
     , spillAnchors : Dict ( Int, Int ) Range
+    , lambdas : Dict String Eval.Lambda
+    , tables : Dict String TableDef
     }
+
+
+{-| A structured table: the whole range (header row first) and whether the last row is a
+totals row. -}
+type alias TableDef =
+    { range : Range, hasTotals : Bool }
 
 
 {-| A validation rule scoped to a range. -}
@@ -201,6 +214,8 @@ empty rows cols =
         , iconSets = []
         , spills = Dict.empty
         , spillAnchors = Dict.empty
+        , lambdas = Dict.empty
+        , tables = Dict.empty
         }
 
 
@@ -621,7 +636,28 @@ ctxFor external ((Sheet m) as sheet) self =
     , external = external
     , locals = Eval.noLocals
     , spill = \anchor -> Dict.get (key anchor) m.spillAnchors
+    , lambda = \name -> Dict.get (String.toUpper name) m.lambdas
+    , tableRange = \name -> Maybe.map .range (Dict.get (String.toUpper name) m.tables)
+    , tableTotals = \name -> Maybe.withDefault False (Maybe.map .hasTotals (Dict.get (String.toUpper name) m.tables))
+    , formulaText = \ref -> formulaTextAt ref sheet
     }
+
+
+{-| The raw formula text at a cell (with its leading `=`) if it is a formula cell, for
+`FORMULATEXT`/`ISFORMULA`. -}
+formulaTextAt : Ref -> Sheet -> Maybe String
+formulaTextAt ref sheet =
+    case get ref sheet of
+        Just cell ->
+            case cell.parsed of
+                PFormula _ ->
+                    Just cell.raw
+
+                _ ->
+                    Nothing
+
+        Nothing ->
+            Nothing
 
 
 {-| Mark the given keys as `#CIRC!`. -}
@@ -987,6 +1023,10 @@ adjustRanges f m =
             Dict.toList m.names
                 |> List.filterMap (\( nm, rng ) -> Maybe.map (\r -> ( nm, r )) (f rng))
                 |> Dict.fromList
+        , tables =
+            Dict.toList m.tables
+                |> List.filterMap (\( nm, t ) -> Maybe.map (\r -> ( nm, { t | range = r } )) (f t.range))
+                |> Dict.fromList
     }
 
 
@@ -1340,6 +1380,47 @@ nameOf name (Sheet m) =
 definedNames : Sheet -> List ( String, Range )
 definedNames (Sheet m) =
     Dict.toList m.names
+
+
+{-| Define a reusable **custom function** from a `LAMBDA(...)` source string. Once defined,
+call it like any built-in: `defineLambda "DISCOUNT" "=LAMBDA(p, p*0.9)"` then `=DISCOUNT(B2)`.
+A malformed lambda is ignored. Names are case-insensitive. -}
+defineLambda : String -> String -> Sheet -> Sheet
+defineLambda name src (Sheet m) =
+    case Eval.parseLambda src of
+        Just lam ->
+            Sheet { m | lambdas = Dict.insert (String.toUpper name) lam m.lambdas }
+
+        Nothing ->
+            Sheet m
+
+
+{-| Define a **structured table** over a range (header row first); `hasTotals` marks a
+trailing totals row. Formulas can then use `Name[Col]`, `Name[@Col]`, `Name[#Headers]`,
+`Name[#Data]`, `Name[#Totals]` and `Name[#All]`. Names are case-insensitive. -}
+defineTable : String -> Range -> Bool -> Sheet -> Sheet
+defineTable name range hasTotals (Sheet m) =
+    Sheet { m | tables = Dict.insert (String.toUpper name) { range = Ref.normalize range, hasTotals = hasTotals } m.tables }
+
+
+{-| The range and totals flag of a defined table, if any. -}
+tableOf : String -> Sheet -> Maybe TableDef
+tableOf name (Sheet m) =
+    Dict.get (String.toUpper name) m.tables
+
+
+{-| The cells a formula cell reads directly (its precedents), as refs — for an audit /
+trace-precedents view. -}
+tracePrecedents : Ref -> Sheet -> List Ref
+tracePrecedents ref sheet =
+    List.map keyToRef (precedentsOf sheet (key ref))
+
+
+{-| The formula cells that read this cell directly (its dependents), as refs. -}
+traceDependents : Ref -> Sheet -> List Ref
+traceDependents ref sheet =
+    Maybe.withDefault [] (Dict.get (key ref) (dependentsMap sheet))
+        |> List.map keyToRef
 
 
 

@@ -113,7 +113,10 @@ knownNames =
     , "CONCAT", "CONCATENATE", "TEXTJOIN", "LEN", "LEFT", "RIGHT", "MID"
     , "UPPER", "LOWER", "TRIM", "CLEAN", "PROPER", "REPT", "REPLACE"
     , "SUBSTITUTE", "FIND", "SEARCH", "EXACT", "VALUE", "CHAR", "CODE", "T"
-    , "TEXT"
+    , "TEXT", "TEXTBEFORE", "TEXTAFTER", "ARRAYTOTEXT"
+
+    -- functional / structured / audit
+    , "XMATCH", "ERROR.TYPE"
 
     -- lookup / reference
     , "VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "CHOOSE", "ROWS", "COLUMNS"
@@ -413,6 +416,34 @@ call name args =
 
         "TEXTJOIN" ->
             textJoin args
+
+        "TEXTBEFORE" ->
+            textPart True vals
+
+        "TEXTAFTER" ->
+            textPart False vals
+
+        "ARRAYTOTEXT" ->
+            case args of
+                a :: _ ->
+                    VText (String.join ", " (List.map Value.toText (flatten [ a ])))
+
+                [] ->
+                    VError ValueErr
+
+        "XMATCH" ->
+            xmatchFn args
+
+        "ERROR.TYPE" ->
+            case vals of
+                [ VError er ] ->
+                    VNumber (toFloat (errorCode er))
+
+                [ _ ] ->
+                    VError NA
+
+                _ ->
+                    VError ValueErr
 
         "LEN" ->
             case vals of
@@ -1634,6 +1665,120 @@ mapNumberToChar v =
 
         _ ->
             v
+
+
+{-| `TEXTBEFORE`/`TEXTAFTER`: the part of the text before (or after) the nth occurrence of a
+delimiter. -}
+textPart : Bool -> List Value -> Value
+textPart before vals =
+    case vals of
+        text :: delim :: rest ->
+            let
+                instance =
+                    case rest of
+                        i :: _ ->
+                            Maybe.withDefault 1 (Maybe.map round (Result.toMaybe (Value.toNumber i)))
+
+                        [] ->
+                            1
+            in
+            case splitAtNth (Value.toText delim) instance (Value.toText text) of
+                Just ( pre, post ) ->
+                    VText
+                        (if before then
+                            pre
+
+                         else
+                            post
+                        )
+
+                Nothing ->
+                    VError NA
+
+        _ ->
+            VError ValueErr
+
+
+splitAtNth : String -> Int -> String -> Maybe ( String, String )
+splitAtNth delim n s =
+    if delim == "" || n < 1 then
+        Nothing
+
+    else
+        case List.head (List.drop (n - 1) (String.indexes delim s)) of
+            Just idx ->
+                Just ( String.left idx s, String.dropLeft (idx + String.length delim) s )
+
+            Nothing ->
+                Nothing
+
+
+{-| `XMATCH`: the 1-based position of the first exact match of `lookup` in the array. -}
+xmatchFn : List Arg -> Value
+xmatchFn args =
+    case args of
+        lookupArg :: arrayArg :: _ ->
+            case indexOfValue (firstValue lookupArg) (flatten [ arrayArg ]) of
+                Just i ->
+                    VNumber (toFloat (i + 1))
+
+                Nothing ->
+                    VError NA
+
+        _ ->
+            VError ValueErr
+
+
+indexOfValue : Value -> List Value -> Maybe Int
+indexOfValue target xs =
+    indexOfHelp 0 target xs
+
+
+indexOfHelp : Int -> Value -> List Value -> Maybe Int
+indexOfHelp i target xs =
+    case xs of
+        [] ->
+            Nothing
+
+        y :: rest ->
+            if Value.equalValue y target then
+                Just i
+
+            else
+                indexOfHelp (i + 1) target rest
+
+
+{-| The numeric code `ERROR.TYPE` reports for each error value (Excel's table; `#SPILL!`
+is 9). -}
+errorCode : Error -> Int
+errorCode err =
+    case err of
+        DivZero ->
+            2
+
+        ValueErr ->
+            3
+
+        RefErr ->
+            4
+
+        NameErr ->
+            5
+
+        NumErr ->
+            6
+
+        NA ->
+            7
+
+        Spill ->
+            9
+
+        Circular ->
+            8
+
+        Parse ->
+            8
 
 
 collapseSpaces : String -> String

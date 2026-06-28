@@ -1,7 +1,13 @@
 module Spreadsheet.Eval exposing
     ( Context
+    , Lambda
     , noLocals
     , noSpill
+    , noLambda
+    , noTableRange
+    , noTableTotals
+    , noFormulaText
+    , parseLambda
     , eval
     , evalString
     , evalMatrix
@@ -43,13 +49,26 @@ type alias Context =
     , self : Ref
     , names : String -> Maybe Range
     , external : String -> Ref -> Value
-    , locals : String -> Maybe Value
+    , locals : String -> Maybe Arg
     , spill : Ref -> Maybe Range
+    , lambda : String -> Maybe Lambda
+    , tableRange : String -> Maybe Range
+    , tableTotals : String -> Bool
+    , formulaText : Ref -> Maybe String
     }
 
 
-{-| A `locals` resolver with no bindings — the default outside a `LET`. -}
-noLocals : String -> Maybe Value
+{-| A parsed `LAMBDA(param1, …, body)`: the parameter names and the body expression. Used
+by the higher-order helpers (`MAP`/`REDUCE`/…) and by named lambdas (`Sheet.defineLambda`)
+to evaluate a body with arguments bound to the parameters. -}
+type alias Lambda =
+    { params : List String
+    , body : Expr
+    }
+
+
+{-| A `locals` resolver with no bindings — the default outside a `LET` or lambda. -}
+noLocals : String -> Maybe Arg
 noLocals _ =
     Nothing
 
@@ -59,6 +78,41 @@ dynamic arrays (or when evaluating outside one). -}
 noSpill : Ref -> Maybe Range
 noSpill _ =
     Nothing
+
+
+{-| A `lambda` resolver with no named lambdas. -}
+noLambda : String -> Maybe Lambda
+noLambda _ =
+    Nothing
+
+
+{-| A `tableRange` resolver that knows of no tables. -}
+noTableRange : String -> Maybe Range
+noTableRange _ =
+    Nothing
+
+
+{-| A `tableTotals` resolver: no table has a totals row. -}
+noTableTotals : String -> Bool
+noTableTotals _ =
+    False
+
+
+{-| A `formulaText` resolver: no cell is known to be a formula. -}
+noFormulaText : Ref -> Maybe String
+noFormulaText _ =
+    Nothing
+
+
+{-| Parse a `LAMBDA(...)` formula string into a `Lambda` (the leading `=` is optional). -}
+parseLambda : String -> Maybe Lambda
+parseLambda src =
+    case Parser.parseFormula src of
+        Ok expr ->
+            asLambda expr
+
+        Err _ ->
+            Nothing
 
 
 {-| Parse and evaluate a formula string (the leading `=` is optional). A parse failure
@@ -88,8 +142,8 @@ eval ctx expr =
 
         NameE name ->
             case ctx.locals name of
-                Just v ->
-                    v
+                Just arg ->
+                    scalarOfArg arg
 
                 Nothing ->
                     case ctx.names name of
@@ -102,6 +156,14 @@ eval ctx expr =
 
                         Nothing ->
                             VError NameErr
+
+        StructRefE tableName selector ->
+            case structScalar ctx tableName selector of
+                Just v ->
+                    v
+
+                Nothing ->
+                    VError RefErr
 
         SpillRefE anchor ->
             case ctx.spill anchor of
@@ -139,6 +201,9 @@ eval ctx expr =
 
             else if name == "LET" then
                 evalLet ctx args
+
+            else if name == "REDUCE" then
+                evalReduce ctx args
 
             else if isArrayForm name then
                 -- Used where a scalar is expected, an array result collapses to its
@@ -264,6 +329,9 @@ evalMatrix ctx expr =
         SpillRefE anchor ->
             Maybe.map (matrixViaLookup ctx) (ctx.spill anchor)
 
+        StructRefE tableName selector ->
+            Maybe.map (matrixViaLookup ctx) (structRange ctx tableName selector)
+
         Func name args ->
             if isArrayForm name then
                 arrayResult ctx name args
@@ -271,8 +339,95 @@ evalMatrix ctx expr =
             else
                 Nothing
 
+        Binary op a b ->
+            broadcastBinary ctx op a b
+
+        Unary op sub ->
+            Maybe.map (List.map (List.map (applyUnary op))) (evalMatrix ctx sub)
+
         _ ->
             Nothing
+
+
+{-| A view of an operand as a 2-D block, for elementwise (broadcasting) operators. Unlike
+`evalMatrix`, a bare range or a range-valued name counts as an array here. -}
+arrayOperand : Context -> Expr -> Maybe (List (List Value))
+arrayOperand ctx e =
+    case e of
+        RangeE range _ _ ->
+            Just (matrixViaLookup ctx range)
+
+        NameE name ->
+            case ctx.locals name of
+                Just (Matrix m) ->
+                    Just m
+
+                Just _ ->
+                    Nothing
+
+                Nothing ->
+                    Maybe.map (matrixViaLookup ctx) (ctx.names name)
+
+        _ ->
+            evalMatrix ctx e
+
+
+{-| Elementwise (broadcasting) binary operator over array operands. Returns `Nothing` when
+*neither* side is an array (so the scalar evaluator handles it instead). A scalar (or 1×1)
+operand broadcasts across the other; a row or column vector broadcasts along its singleton
+axis; out-of-shape cells become `#N/A`. -}
+broadcastBinary : Context -> BinaryOp -> Expr -> Expr -> Maybe (List (List Value))
+broadcastBinary ctx op a b =
+    case ( arrayOperand ctx a, arrayOperand ctx b ) of
+        ( Nothing, Nothing ) ->
+            Nothing
+
+        ( ma, mb ) ->
+            let
+                am =
+                    Maybe.withDefault [ [ eval ctx a ] ] ma
+
+                bm =
+                    Maybe.withDefault [ [ eval ctx b ] ] mb
+
+                rows =
+                    max (List.length am) (List.length bm)
+
+                cols =
+                    max (matWidth am) (matWidth bm)
+            in
+            Just
+                (List.map
+                    (\i -> List.map (\j -> applyBinary op (broadcastAt am i j) (broadcastAt bm i j)) (List.range 0 (cols - 1)))
+                    (List.range 0 (rows - 1))
+                )
+
+
+{-| Read cell `(i, j)` of a matrix with broadcasting: a single-row matrix repeats its row,
+a single-column matrix repeats its column; anything out of range is `#N/A`. -}
+broadcastAt : List (List Value) -> Int -> Int -> Value
+broadcastAt m i j =
+    let
+        r =
+            if List.length m == 1 then
+                0
+
+            else
+                i
+
+        c =
+            if matWidth m == 1 then
+                0
+
+            else
+                j
+    in
+    case List.head (List.drop r m) of
+        Just row ->
+            Maybe.withDefault (VError NA) (List.head (List.drop c row))
+
+        Nothing ->
+            VError NA
 
 
 matrixViaLookup : Context -> Range -> List (List Value)
@@ -287,6 +442,8 @@ isArrayForm name =
         [ "UNIQUE", "SORT", "SORTBY", "FILTER", "SEQUENCE", "TRANSPOSE"
         , "HSTACK", "VSTACK", "CHOOSEROWS", "CHOOSECOLS", "TAKE", "DROP", "TOROW", "TOCOL"
         , "LINEST", "TREND", "GROWTH"
+        , "MAP", "SCAN", "MAKEARRAY", "BYROW", "BYCOL"
+        , "TEXTSPLIT", "WRAPROWS", "WRAPCOLS", "EXPAND"
         ]
 
 
@@ -352,6 +509,33 @@ arrayResult ctx name args =
 
         "GROWTH" ->
             trendResult ctx args True
+
+        "MAP" ->
+            mapResult ctx args
+
+        "SCAN" ->
+            scanResult ctx args
+
+        "MAKEARRAY" ->
+            makeArrayResult ctx args
+
+        "BYROW" ->
+            byLineResult ctx args True
+
+        "BYCOL" ->
+            byLineResult ctx args False
+
+        "TEXTSPLIT" ->
+            textSplitResult ctx args
+
+        "WRAPROWS" ->
+            Maybe.map (\m -> wrap (intArg ctx 1 1 args) (padOf ctx args) True (List.concat m)) (argMatrixAt ctx 0 args)
+
+        "WRAPCOLS" ->
+            Maybe.map (\m -> wrap (intArg ctx 1 1 args) (padOf ctx args) False (List.concat m)) (argMatrixAt ctx 0 args)
+
+        "EXPAND" ->
+            expandResult ctx args
 
         _ ->
             Nothing
@@ -747,6 +931,472 @@ flipOrder o =
 
 
 
+-- LAMBDA & HIGHER-ORDER FUNCTIONS --------------------------------------------
+
+
+{-| Recognise `LAMBDA(param1, …, body)` and split it into its parameter names and body. -}
+asLambda : Expr -> Maybe Lambda
+asLambda expr =
+    case expr of
+        Func "LAMBDA" args ->
+            case List.reverse args of
+                body :: revParams ->
+                    let
+                        params =
+                            List.filterMap nameOfExpr revParams
+                    in
+                    if List.length params == List.length revParams then
+                        Just { params = List.reverse params, body = body }
+
+                    else
+                        Nothing
+
+                [] ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+nameOfExpr : Expr -> Maybe String
+nameOfExpr e =
+    case e of
+        NameE n ->
+            Just n
+
+        _ ->
+            Nothing
+
+
+{-| Evaluate a lambda body with its parameters bound to the given arguments. -}
+applyLambda : Context -> Lambda -> List Arg -> Value
+applyLambda ctx lam argv =
+    evalWithEnv ctx (Dict.fromList (List.map2 (\p a -> ( p, a )) lam.params argv)) lam.body
+
+
+{-| `MAP(array1, …, lambda)`: apply the lambda elementwise across one or more equal-shaped
+arrays, producing a result of the first array's shape. -}
+mapResult : Context -> List Expr -> Maybe (List (List Value))
+mapResult ctx args =
+    case List.reverse args of
+        lambdaE :: revArrays ->
+            case asLambda lambdaE of
+                Just lam ->
+                    let
+                        arrays =
+                            List.map (argMatrix ctx) (List.reverse revArrays)
+                    in
+                    case arrays of
+                        first :: _ ->
+                            Just
+                                (List.indexedMap
+                                    (\i row ->
+                                        List.indexedMap
+                                            (\j _ -> applyLambda ctx lam (List.map (\m -> Scalar (broadcastAt m i j)) arrays))
+                                            row
+                                    )
+                                    first
+                                )
+
+                        [] ->
+                            Nothing
+
+                Nothing ->
+                    Nothing
+
+        [] ->
+            Nothing
+
+
+{-| `REDUCE(init, array, lambda(acc, value))`: left-fold the array into a single value. -}
+evalReduce : Context -> List Expr -> Value
+evalReduce ctx args =
+    case args of
+        initE :: arrayE :: lambdaE :: _ ->
+            case asLambda lambdaE of
+                Just lam ->
+                    List.foldl
+                        (\v acc -> applyLambda ctx lam [ Scalar acc, Scalar v ])
+                        (eval ctx initE)
+                        (List.concat (argMatrix ctx arrayE))
+
+                Nothing ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+{-| `SCAN(init, array, lambda(acc, value))`: like `REDUCE`, but emit each running
+accumulator, spilling a block of the array's shape. -}
+scanResult : Context -> List Expr -> Maybe (List (List Value))
+scanResult ctx args =
+    case args of
+        initE :: arrayE :: lambdaE :: _ ->
+            case asLambda lambdaE of
+                Just lam ->
+                    let
+                        m =
+                            argMatrix ctx arrayE
+
+                        step v ( acc, outs ) =
+                            let
+                                nv =
+                                    applyLambda ctx lam [ Scalar acc, Scalar v ]
+                            in
+                            ( nv, outs ++ [ nv ] )
+
+                        ( _, flat ) =
+                            List.foldl step ( eval ctx initE, [] ) (List.concat m)
+                    in
+                    Just (reshapeLike m flat)
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+{-| `MAKEARRAY(rows, cols, lambda(r, c))`: build a `rows × cols` block from a lambda of the
+(1-based) row and column index. -}
+makeArrayResult : Context -> List Expr -> Maybe (List (List Value))
+makeArrayResult ctx args =
+    case args of
+        rowsE :: colsE :: lambdaE :: _ ->
+            case asLambda lambdaE of
+                Just lam ->
+                    let
+                        r =
+                            max 0 (round (Result.withDefault 0 (Value.toNumber (eval ctx rowsE))))
+
+                        c =
+                            max 0 (round (Result.withDefault 0 (Value.toNumber (eval ctx colsE))))
+                    in
+                    Just
+                        (List.map
+                            (\i -> List.map (\j -> applyLambda ctx lam [ Scalar (VNumber (toFloat i)), Scalar (VNumber (toFloat j)) ]) (List.range 1 c))
+                            (List.range 1 r)
+                        )
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+{-| `BYROW(array, lambda(row))` / `BYCOL(array, lambda(col))`: apply the lambda to each row
+(or column) — passed as a 1-D array — collapsing to a single column (or row) of results. -}
+byLineResult : Context -> List Expr -> Bool -> Maybe (List (List Value))
+byLineResult ctx args isRow =
+    case args of
+        arrayE :: lambdaE :: _ ->
+            case asLambda lambdaE of
+                Just lam ->
+                    let
+                        m0 =
+                            argMatrix ctx arrayE
+
+                        lines =
+                            if isRow then
+                                m0
+
+                            else
+                                Spill.transpose m0
+
+                        results =
+                            List.map (\line -> applyLambda ctx lam [ Matrix [ line ] ]) lines
+                    in
+                    Just
+                        (if isRow then
+                            List.map (\v -> [ v ]) results
+
+                         else
+                            [ results ]
+                        )
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+{-| Re-chunk a flat list into a matrix with the same row sizes as `template`. -}
+reshapeLike : List (List a) -> List a -> List (List a)
+reshapeLike template flat =
+    case template of
+        [] ->
+            []
+
+        row :: rest ->
+            let
+                n =
+                    List.length row
+            in
+            List.take n flat :: reshapeLike rest (List.drop n flat)
+
+
+
+-- TEXT & RESHAPE ARRAYS ------------------------------------------------------
+
+
+{-| `TEXTSPLIT(text, colDelim, [rowDelim])`: split text into a row, or (with a row
+delimiter) a 2-D block. -}
+textSplitResult : Context -> List Expr -> Maybe (List (List Value))
+textSplitResult ctx args =
+    case args of
+        textE :: colDelimE :: rest ->
+            let
+                s =
+                    Value.toText (eval ctx textE)
+
+                colD =
+                    Value.toText (eval ctx colDelimE)
+
+                rowD =
+                    case rest of
+                        dE :: _ ->
+                            Value.toText (eval ctx dE)
+
+                        [] ->
+                            ""
+            in
+            Just
+                (if rowD == "" then
+                    [ List.map VText (splitBy colD s) ]
+
+                 else
+                    List.map (\line -> List.map VText (splitBy colD line)) (splitBy rowD s)
+                )
+
+        _ ->
+            Nothing
+
+
+splitBy : String -> String -> List String
+splitBy d s =
+    if d == "" then
+        [ s ]
+
+    else
+        String.split d s
+
+
+padOf : Context -> List Expr -> Value
+padOf ctx args =
+    case List.head (List.drop 2 args) of
+        Just e ->
+            eval ctx e
+
+        Nothing ->
+            VError NA
+
+
+{-| `WRAPROWS`/`WRAPCOLS`: fold a 1-D vector into a block `count` wide (rows) or tall
+(cols), padding the short final line. -}
+wrap : Int -> Value -> Bool -> List Value -> List (List Value)
+wrap count pad isRows flat =
+    let
+        rows =
+            List.map (\c -> c ++ List.repeat (max 0 (count - List.length c)) pad) (chunk count flat)
+    in
+    if isRows then
+        rows
+
+    else
+        Spill.transpose rows
+
+
+chunk : Int -> List a -> List (List a)
+chunk n xs =
+    if n <= 0 then
+        [ xs ]
+
+    else
+        case xs of
+            [] ->
+                []
+
+            _ ->
+                List.take n xs :: chunk n (List.drop n xs)
+
+
+{-| `EXPAND(array, rows, [cols], [pad])`: grow a block to the given size, padding new
+cells. -}
+expandResult : Context -> List Expr -> Maybe (List (List Value))
+expandResult ctx args =
+    case argMatrixAt ctx 0 args of
+        Just m ->
+            let
+                r =
+                    Maybe.withDefault (List.length m) (intArgMaybe ctx 1 args)
+
+                c =
+                    Maybe.withDefault (matWidth m) (intArgMaybe ctx 2 args)
+
+                pad =
+                    case List.head (List.drop 3 args) of
+                        Just e ->
+                            eval ctx e
+
+                        Nothing ->
+                            VError NA
+            in
+            Just
+                (List.map
+                    (\i -> List.map (\j -> elemOr pad m i j) (List.range 0 (c - 1)))
+                    (List.range 0 (r - 1))
+                )
+
+        Nothing ->
+            Nothing
+
+
+elemOr : Value -> List (List Value) -> Int -> Int -> Value
+elemOr pad m i j =
+    case List.head (List.drop i m) of
+        Just row ->
+            Maybe.withDefault pad (List.head (List.drop j row))
+
+        Nothing ->
+            pad
+
+
+
+-- STRUCTURED TABLE REFERENCES ------------------------------------------------
+
+
+{-| The range a structured reference resolves to (a column, the headers, the data body,
+the totals row or the whole table), or `Nothing` for a `@`-this-row reference (which is a
+single cell, handled in scalar position). -}
+structRange : Context -> String -> String -> Maybe Range
+structRange ctx tableName selector =
+    case ctx.tableRange tableName of
+        Just range ->
+            let
+                n =
+                    Ref.normalize range
+
+                hasTotals =
+                    ctx.tableTotals tableName
+
+                headerRow =
+                    n.start.row
+
+                dataStart =
+                    headerRow + 1
+
+                dataEnd =
+                    if hasTotals then
+                        n.end.row - 1
+
+                    else
+                        n.end.row
+            in
+            case String.toUpper selector of
+                "#ALL" ->
+                    Just n
+
+                "#HEADERS" ->
+                    Just { start = n.start, end = { col = n.end.col, row = headerRow } }
+
+                "#DATA" ->
+                    dataBodyRange n dataStart dataEnd
+
+                "#TOTALS" ->
+                    if hasTotals then
+                        Just { start = { col = n.start.col, row = n.end.row }, end = n.end }
+
+                    else
+                        Nothing
+
+                up ->
+                    if String.startsWith "@" up then
+                        Nothing
+
+                    else
+                        columnRange ctx n dataStart dataEnd selector
+
+        Nothing ->
+            Nothing
+
+
+dataBodyRange : Range -> Int -> Int -> Maybe Range
+dataBodyRange n dataStart dataEnd =
+    if dataEnd >= dataStart then
+        Just { start = { col = n.start.col, row = dataStart }, end = { col = n.end.col, row = dataEnd } }
+
+    else
+        Nothing
+
+
+{-| The data range of the column whose header matches `colName` (case-insensitive). -}
+columnRange : Context -> Range -> Int -> Int -> String -> Maybe Range
+columnRange ctx n dataStart dataEnd colName =
+    case columnIndex ctx n colName of
+        Just c ->
+            if dataEnd >= dataStart then
+                Just { start = { col = c, row = dataStart }, end = { col = c, row = dataEnd } }
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+columnIndex : Context -> Range -> String -> Maybe Int
+columnIndex ctx n colName =
+    List.head
+        (List.filter
+            (\c -> sameText (Value.toText (ctx.lookup { col = c, row = n.start.row })) colName)
+            (List.range n.start.col n.end.col)
+        )
+
+
+sameText : String -> String -> Bool
+sameText a b =
+    String.toUpper (String.trim a) == String.toUpper (String.trim b)
+
+
+{-| A structured reference in scalar position: a `@`-reference reads the current row's cell
+in that column; anything else collapses its range to the top-left cell. -}
+structScalar : Context -> String -> String -> Maybe Value
+structScalar ctx tableName selector =
+    if String.startsWith "@" selector then
+        thisRowCell ctx tableName (String.dropLeft 1 selector)
+
+    else
+        Maybe.map (\r -> ctx.lookup (Ref.normalize r).start) (structRange ctx tableName selector)
+
+
+structScalarOnly : Context -> String -> String -> Value
+structScalarOnly ctx tableName selector =
+    Maybe.withDefault (VError RefErr) (structScalar ctx tableName selector)
+
+
+thisRowCell : Context -> String -> String -> Maybe Value
+thisRowCell ctx tableName colName =
+    case ctx.tableRange tableName of
+        Just range ->
+            let
+                n =
+                    Ref.normalize range
+            in
+            case columnIndex ctx n colName of
+                Just c ->
+                    Just (ctx.lookup { col = c, row = ctx.self.row })
+
+                Nothing ->
+                    Just (VError RefErr)
+
+        Nothing ->
+            Nothing
+
+
+
 -- LET ------------------------------------------------------------------------
 
 
@@ -757,25 +1407,37 @@ evalLet ctx args =
     letBind ctx Dict.empty args
 
 
-letBind : Context -> Dict String Value -> List Expr -> Value
+letBind : Context -> Dict String Arg -> List Expr -> Value
 letBind ctx env args =
     case args of
         [ finalE ] ->
             evalWithEnv ctx env finalE
 
         (NameE name) :: valueE :: rest ->
-            letBind ctx (Dict.insert name (evalWithEnv ctx env valueE) env) rest
+            letBind ctx (Dict.insert name (evalArgWithEnv ctx env valueE) env) rest
 
         _ ->
             VError ValueErr
 
 
-evalWithEnv : Context -> Dict String Value -> Expr -> Value
+evalWithEnv : Context -> Dict String Arg -> Expr -> Value
 evalWithEnv ctx env e =
-    eval { ctx | locals = extendLocals env ctx } e
+    eval (withLocals env ctx) e
 
 
-extendLocals : Dict String Value -> Context -> String -> Maybe Value
+evalArgWithEnv : Context -> Dict String Arg -> Expr -> Arg
+evalArgWithEnv ctx env e =
+    evalArg (withLocals env ctx) e
+
+
+{-| Extend a context's `locals` with an environment of bindings (used by `LET` and the
+lambda helpers). -}
+withLocals : Dict String Arg -> Context -> Context
+withLocals env ctx =
+    { ctx | locals = extendLocals env ctx }
+
+
+extendLocals : Dict String Arg -> Context -> String -> Maybe Arg
 extendLocals env ctx n =
     case Dict.get n env of
         Just v ->
@@ -783,6 +1445,18 @@ extendLocals env ctx n =
 
         Nothing ->
             ctx.locals n
+
+
+{-| The scalar view of an argument: a scalar passes through; a matrix collapses to its
+top-left cell (implicit intersection). -}
+scalarOfArg : Arg -> Value
+scalarOfArg arg =
+    case arg of
+        Scalar v ->
+            v
+
+        Matrix rows ->
+            topLeftOf rows
 
 
 {-| A range used where a scalar is expected collapses to its top-left cell. -}
@@ -829,8 +1503,48 @@ evalFunc ctx name args =
         "TEXT" ->
             evalText ctx args
 
+        "ISFORMULA" ->
+            VBool (isFormulaCell ctx args)
+
+        "FORMULATEXT" ->
+            case Maybe.andThen ctx.formulaText (refArg args) of
+                Just t ->
+                    VText t
+
+                Nothing ->
+                    VError NA
+
         _ ->
-            Functions.call name (List.map (evalArg ctx) args)
+            case ctx.lambda name of
+                Just lam ->
+                    applyLambda ctx lam (List.map (evalArg ctx) args)
+
+                Nothing ->
+                    Functions.call name (List.map (evalArg ctx) args)
+
+
+{-| The `Ref` an audit function is asked about (its first argument). -}
+refArg : List Expr -> Maybe Ref
+refArg args =
+    case args of
+        (RefE ref _) :: _ ->
+            Just ref
+
+        (RangeE range _ _) :: _ ->
+            Just (Ref.normalize range).start
+
+        _ ->
+            Nothing
+
+
+isFormulaCell : Context -> List Expr -> Bool
+isFormulaCell ctx args =
+    case Maybe.andThen ctx.formulaText (refArg args) of
+        Just _ ->
+            True
+
+        Nothing ->
+            False
 
 
 {-| Evaluate an argument expression, preserving 2-D shape for range references so that
@@ -843,8 +1557,8 @@ evalArg ctx expr =
 
         NameE name ->
             case ctx.locals name of
-                Just v ->
-                    Scalar v
+                Just arg ->
+                    arg
 
                 Nothing ->
                     case ctx.names name of
@@ -853,6 +1567,14 @@ evalArg ctx expr =
 
                         Nothing ->
                             Scalar (VError NameErr)
+
+        StructRefE tableName selector ->
+            case structRange ctx tableName selector of
+                Just range ->
+                    matrixOf ctx range
+
+                Nothing ->
+                    Scalar (structScalarOnly ctx tableName selector)
 
         SpillRefE anchor ->
             case ctx.spill anchor of

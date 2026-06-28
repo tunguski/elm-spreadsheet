@@ -56,6 +56,11 @@ precedentsHelp resolveName expr acc =
             -- block is filled in by the same anchor, so the fix-point recalc settles it.
             ( ref.col, ref.row ) :: acc
 
+        StructRefE _ _ ->
+            -- Structured references resolve through the sheet's table definitions, which
+            -- Deps doesn't see; the full recalc keeps their dependents up to date.
+            acc
+
         SheetRefE _ _ _ ->
             -- Cross-sheet refs are not local precedents; the workbook resolves them.
             acc

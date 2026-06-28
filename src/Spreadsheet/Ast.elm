@@ -26,7 +26,10 @@ copy/fill can shift only the relative parts and the serializer can reproduce the
 markers. `NameE` is a defined-name reference (e.g. `TaxRate`) resolved against the sheet's
 name table at evaluation time. `SpillRefE` is a **spill reference** (`A1#`): it stands for
 the whole dynamic-array block that spilled from anchor `A1`, resolved against the sheet's
-recorded spill ranges at evaluation time. `SheetRefE`/`SheetRangeE` are **cross-sheet**
+recorded spill ranges at evaluation time. `StructRefE tableName selector` is a **structured
+table reference** (`Sales[Amount]`, `Sales[@Qty]`, `Sales[#Totals]`): the selector is the
+raw bracket contents, resolved against the sheet's table definitions at evaluation time.
+`SheetRefE`/`SheetRangeE` are **cross-sheet**
 references (`Data!A1`, `Data!A1:B5`) carrying the other sheet's name; they are resolved
 against the workbook (`Spreadsheet.Workbook`) rather than the current sheet. -}
 type Expr
@@ -35,6 +38,7 @@ type Expr
     | RangeE Range Abs Abs
     | NameE String
     | SpillRefE Ref
+    | StructRefE String String
     | SheetRefE String Ref Abs
     | SheetRangeE String Range Abs Abs
     | Unary UnaryOp Expr

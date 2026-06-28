@@ -43,6 +43,9 @@ type Token
     | TColon
     | TBang
     | THash
+    | TLBracket
+    | TRBracket
+    | TAt
     | TPlus
     | TMinus
     | TStar
@@ -90,6 +93,15 @@ tokenizeHelp chars acc =
 
             else if c == '#' then
                 tokenizeHelp rest (THash :: acc)
+
+            else if c == '[' then
+                tokenizeHelp rest (TLBracket :: acc)
+
+            else if c == ']' then
+                tokenizeHelp rest (TRBracket :: acc)
+
+            else if c == '@' then
+                tokenizeHelp rest (TAt :: acc)
 
             else if c == '+' then
                 tokenizeHelp rest (TPlus :: acc)
@@ -524,8 +536,30 @@ parseIdentifier name tokens =
             -- `Sheet!A1` or `Sheet!A1:B5`: a cross-sheet reference.
             parseSheetRef name cellName rest
 
+        TLBracket :: rest ->
+            -- `Table[Col]` / `Table[@Col]` / `Table[#Totals]`: a structured reference.
+            parseStructRef name rest
+
         _ ->
             parseLocalIdentifier name tokens
+
+
+{-| Parse the bracket contents following a table name: a column, a `@`-this-row column, or
+a `#`-special area selector. -}
+parseStructRef : String -> List Token -> Result String ( Expr, List Token )
+parseStructRef name tokens =
+    case tokens of
+        THash :: (TIdent sel) :: TRBracket :: rest ->
+            Ok ( StructRefE (String.toUpper name) ("#" ++ String.toUpper sel), rest )
+
+        TAt :: (TIdent col) :: TRBracket :: rest ->
+            Ok ( StructRefE (String.toUpper name) ("@" ++ col), rest )
+
+        (TIdent col) :: TRBracket :: rest ->
+            Ok ( StructRefE (String.toUpper name) col, rest )
+
+        _ ->
+            Err "bad structured reference"
 
 
 parseLocalIdentifier : String -> List Token -> Result String ( Expr, List Token )

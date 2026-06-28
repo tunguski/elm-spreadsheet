@@ -55,6 +55,9 @@ render e =
         SpillRefE ref ->
             ( Ref.toA1 ref ++ "#", atomP )
 
+        StructRefE tableName selector ->
+            ( tableName ++ "[" ++ selector ++ "]", atomP )
+
         SheetRefE sheetName ref abs ->
             ( sheetName ++ "!" ++ Ref.toA1Abs abs ref, atomP )
 

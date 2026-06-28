@@ -58,6 +58,12 @@ mapRefs touchCross fRef fRange e =
         NameE _ ->
             e
 
+        SpillRefE _ ->
+            e
+
+        StructRefE _ _ ->
+            e
+
         RefE ref abs ->
             case fRef ref abs of
                 Just r2 ->
