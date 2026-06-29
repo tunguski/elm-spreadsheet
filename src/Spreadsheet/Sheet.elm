@@ -68,6 +68,10 @@ module Spreadsheet.Sheet exposing
     , fillSeries
     , spillInto
     , sortRange
+    , sortByKeys
+    , removeDuplicates
+    , textToColumns
+    , transposeRange
     , filterRows
     , defineName
     , clearName
@@ -1616,6 +1620,182 @@ sortRange range keyCol ascending ((Sheet m) as sheet) =
                 (List.map2 (\r rd -> ( r, rd )) rows sorted)
     in
     Sheet { m | cells = placed }
+
+
+{-| Sort the rows of a range by several key columns in priority order (each `(col,
+ascending)`); whole cells move together, references aren't rewritten (data ranges only).
+Recalculate afterwards. -}
+sortByKeys : Range -> List ( Int, Bool ) -> Sheet -> Sheet
+sortByKeys range keys ((Sheet m) as sheet) =
+    let
+        n =
+            Ref.normalize range
+
+        rows =
+            List.range n.start.row n.end.row
+
+        cols =
+            List.range n.start.col n.end.col
+
+        rowData =
+            List.map
+                (\r ->
+                    { keyVals = List.map (\( kc, _ ) -> valueAt { col = kc, row = r } sheet) keys
+                    , cells = List.filterMap (\c -> Maybe.map (\cell -> ( c, cell )) (Dict.get ( c, r ) m.cells)) cols
+                    }
+                )
+                rows
+
+        sorted =
+            List.sortWith (\a b -> compareKeyRows keys a.keyVals b.keyVals) rowData
+
+        cleared =
+            List.foldl (\r acc -> List.foldl (\c a -> Dict.remove ( c, r ) a) acc cols) m.cells rows
+
+        placed =
+            List.foldl
+                (\( r, rd ) acc -> List.foldl (\( c, cell ) a -> Dict.insert ( c, r ) cell a) acc rd.cells)
+                cleared
+                (List.map2 (\r rd -> ( r, rd )) rows sorted)
+    in
+    Sheet { m | cells = placed }
+
+
+compareKeyRows : List ( Int, Bool ) -> List Value -> List Value -> Order
+compareKeyRows keys avs bvs =
+    firstOrder
+        (List.map3
+            (\( _, ascending ) av bv ->
+                let
+                    o =
+                        Value.compare av bv
+                in
+                if ascending then
+                    o
+
+                else
+                    flipOrder o
+            )
+            keys
+            avs
+            bvs
+        )
+
+
+firstOrder : List Order -> Order
+firstOrder orders =
+    case orders of
+        [] ->
+            EQ
+
+        o :: rest ->
+            if o == EQ then
+                firstOrder rest
+
+            else
+                o
+
+
+{-| Remove duplicate rows within a range (comparing display text across the range's
+columns), keeping the first of each and compacting the rest up; trailing rows are cleared.
+Recalculate afterwards. -}
+removeDuplicates : Range -> Sheet -> Sheet
+removeDuplicates range ((Sheet m) as sheet) =
+    let
+        n =
+            Ref.normalize range
+
+        rows =
+            List.range n.start.row n.end.row
+
+        cols =
+            List.range n.start.col n.end.col
+
+        rowSig r =
+            List.map (\c -> Value.toText (valueAt { col = c, row = r } sheet)) cols
+
+        rowCells r =
+            List.filterMap (\c -> Maybe.map (\cell -> ( c, cell )) (Dict.get ( c, r ) m.cells)) cols
+
+        kept =
+            dedupRows rows rowSig []
+
+        cleared =
+            List.foldl (\r acc -> List.foldl (\c a -> Dict.remove ( c, r ) a) acc cols) m.cells rows
+
+        placed =
+            List.foldl
+                (\( r, cells ) acc -> List.foldl (\( c, cell ) a -> Dict.insert ( c, r ) cell a) acc cells)
+                cleared
+                (List.map2 (\r src -> ( r, rowCells src )) (List.range n.start.row (n.start.row + List.length kept - 1)) kept)
+    in
+    Sheet { m | cells = placed }
+
+
+dedupRows : List Int -> (Int -> List String) -> List (List String) -> List Int
+dedupRows rows sig seen =
+    case rows of
+        [] ->
+            []
+
+        r :: rest ->
+            let
+                s =
+                    sig r
+            in
+            if List.member s seen then
+                dedupRows rest sig seen
+
+            else
+                r :: dedupRows rest sig (s :: seen)
+
+
+{-| Split each cell of a one-column range by `delimiter` into the columns to its right.
+Recalculate afterwards. -}
+textToColumns : Range -> String -> Sheet -> Sheet
+textToColumns range delimiter sheet =
+    let
+        n =
+            Ref.normalize range
+    in
+    List.foldl
+        (\r s ->
+            let
+                parts =
+                    if delimiter == "" then
+                        [ rawAt { col = n.start.col, row = r } s ]
+
+                    else
+                        String.split delimiter (rawAt { col = n.start.col, row = r } s)
+            in
+            List.foldl (\( i, p ) acc -> setRaw { col = n.start.col + i, row = r } p acc) s (List.indexedMap (\i p -> ( i, p )) parts)
+        )
+        sheet
+        (List.range n.start.row n.end.row)
+
+
+{-| Write the transpose of a range (rows become columns) with its top-left at `anchor`.
+Recalculate afterwards. -}
+transposeRange : Range -> Ref -> Sheet -> Sheet
+transposeRange range anchor sheet =
+    let
+        n =
+            Ref.normalize range
+
+        edits =
+            List.concatMap
+                (\r ->
+                    List.map
+                        (\c ->
+                            ( { col = anchor.col + (r - n.start.row), row = anchor.row + (c - n.start.col) }
+                            , rawAt { col = c, row = r } sheet
+                            )
+                        )
+                        (List.range n.start.col n.end.col)
+                )
+                (List.range n.start.row n.end.row)
+    in
+    setRawMany edits sheet
 
 
 flipOrder : Order -> Order

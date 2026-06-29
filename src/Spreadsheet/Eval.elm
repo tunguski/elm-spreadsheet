@@ -445,6 +445,7 @@ isArrayForm name =
         , "MAP", "SCAN", "MAKEARRAY", "BYROW", "BYCOL"
         , "TEXTSPLIT", "WRAPROWS", "WRAPCOLS", "EXPAND"
         , "GROUPBY", "PIVOTBY", "FREQUENCY", "MODE.MULT"
+        , "MMULT", "MINVERSE", "MUNIT"
         ]
 
 
@@ -550,8 +551,214 @@ arrayResult ctx name args =
         "MODE.MULT" ->
             modeMultResult ctx args
 
+        "MMULT" ->
+            case ( argMatrixAt ctx 0 args, argMatrixAt ctx 1 args ) of
+                ( Just a, Just b ) ->
+                    matMul (numMatrix a) (numMatrix b)
+
+                _ ->
+                    Nothing
+
+        "MINVERSE" ->
+            Maybe.andThen (\m -> matInverse (numMatrix m)) (argMatrixAt ctx 0 args)
+
+        "MUNIT" ->
+            Just (numbersToMatrix (identityMatrix (max 0 (intArg ctx 0 1 args))))
+
         _ ->
             Nothing
+
+
+
+-- LINEAR ALGEBRA -------------------------------------------------------------
+
+
+{-| A value matrix as a numeric matrix (non-numbers → 0), for the matrix functions. -}
+numMatrix : List (List Value) -> List (List Float)
+numMatrix m =
+    List.map (List.map (\v -> Result.withDefault 0 (Value.toNumber v))) m
+
+
+numbersToMatrix : List (List Float) -> List (List Value)
+numbersToMatrix m =
+    List.map (List.map VNumber) m
+
+
+{-| Matrix product `a · b` (a is m×n, b is n×p) → m×p, or `Nothing` if the inner
+dimensions disagree. -}
+matMul : List (List Float) -> List (List Float) -> Maybe (List (List Value))
+matMul a b =
+    let
+        bt =
+            transposeF b
+
+        innerOk =
+            List.all (\row -> List.length row == List.length b) a
+    in
+    if not innerOk || List.isEmpty b then
+        Nothing
+
+    else
+        Just
+            (List.map
+                (\row -> List.map (\col -> VNumber (dot row col)) bt)
+                a
+            )
+
+
+dot : List Float -> List Float -> Float
+dot xs ys =
+    List.sum (List.map2 (*) xs ys)
+
+
+transposeF : List (List Float) -> List (List Float)
+transposeF rows =
+    if List.isEmpty rows || List.any List.isEmpty rows then
+        []
+
+    else
+        List.filterMap List.head rows :: transposeF (List.map (List.drop 1) rows)
+
+
+identityMatrix : Int -> List (List Float)
+identityMatrix n =
+    List.map
+        (\i ->
+            List.map
+                (\j ->
+                    if i == j then
+                        1
+
+                    else
+                        0
+                )
+                (List.range 0 (n - 1))
+        )
+        (List.range 0 (n - 1))
+
+
+{-| Inverse of a square matrix by Gauss-Jordan elimination on `[A | I]`; `Nothing` for a
+non-square or singular matrix. -}
+matInverse : List (List Float) -> Maybe (List (List Value))
+matInverse a =
+    let
+        n =
+            List.length a
+    in
+    if n == 0 || List.any (\row -> List.length row /= n) a then
+        Nothing
+
+    else
+        let
+            augmented =
+                List.map2 (\row idRow -> row ++ idRow) a (identityMatrix n)
+        in
+        Maybe.map (\reduced -> numbersToMatrix (List.map (List.drop n) reduced))
+            (gaussJordan 0 n augmented)
+
+
+gaussJordan : Int -> Int -> List (List Float) -> Maybe (List (List Float))
+gaussJordan col n rows =
+    if col >= n then
+        Just rows
+
+    else
+        case pivotRow col n rows of
+            Nothing ->
+                Nothing
+
+            Just pivotIdx ->
+                let
+                    swapped =
+                        swapRows col pivotIdx rows
+
+                    pivotVal =
+                        elemAt col col swapped
+
+                    normalized =
+                        List.indexedMap
+                            (\i row ->
+                                if i == col then
+                                    List.map (\x -> x / pivotVal) row
+
+                                else
+                                    row
+                            )
+                            swapped
+
+                    pivotR =
+                        Maybe.withDefault [] (List.head (List.drop col normalized))
+
+                    eliminated =
+                        List.indexedMap
+                            (\i row ->
+                                if i == col then
+                                    row
+
+                                else
+                                    let
+                                        factor =
+                                            elemAt i col normalized
+                                    in
+                                    List.map2 (\x p -> x - factor * p) row pivotR
+                            )
+                            normalized
+                in
+                gaussJordan (col + 1) n eliminated
+
+
+{-| The index (≥ `col`) of the row with the largest absolute value in `col` (partial
+pivoting); `Nothing` if the whole column is ~0 (singular). -}
+pivotRow : Int -> Int -> List (List Float) -> Maybe Int
+pivotRow col n rows =
+    let
+        candidates =
+            List.range col (n - 1)
+                |> List.map (\i -> ( i, abs (elemAt i col rows) ))
+                |> List.filter (\( _, v ) -> v > 1.0e-12)
+    in
+    candidates
+        |> List.sortBy (\( _, v ) -> -v)
+        |> List.head
+        |> Maybe.map Tuple.first
+
+
+elemAt : Int -> Int -> List (List Float) -> Float
+elemAt i j rows =
+    case List.head (List.drop i rows) of
+        Just row ->
+            Maybe.withDefault 0 (List.head (List.drop j row))
+
+        Nothing ->
+            0
+
+
+swapRows : Int -> Int -> List (List a) -> List (List a)
+swapRows i j rows =
+    let
+        ri =
+            List.head (List.drop i rows)
+
+        rj =
+            List.head (List.drop j rows)
+    in
+    case ( ri, rj ) of
+        ( Just rowI, Just rowJ ) ->
+            List.indexedMap
+                (\k row ->
+                    if k == i then
+                        rowJ
+
+                    else if k == j then
+                        rowI
+
+                    else
+                        row
+                )
+                rows
+
+        _ ->
+            rows
 
 
 argMatrix : Context -> Expr -> List (List Value)

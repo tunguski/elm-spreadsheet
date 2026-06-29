@@ -143,13 +143,15 @@ chartBody : { kind : Chart.Kind, title : String, labels : List String, values : 
 chartBody cfg =
     case cfg.kind of
         Chart.Column ->
-            div [ HA.class "ss-chart-cols" ]
-                (List.indexedMap
-                    (\i frac ->
-                        div [ HA.class "ss-chart-colwrap" ]
-                            [ div [ HA.class "ss-chart-col", HA.style "height" (pct (frac * 100)), HA.style "background" (colorAt i cfg.colors) ] [] ]
+            plotted
+                (div [ HA.class "ss-chart-cols" ]
+                    (List.indexedMap
+                        (\i frac ->
+                            div [ HA.class "ss-chart-colwrap" ]
+                                [ div [ HA.class "ss-chart-col", HA.style "height" (pct (frac * 100)), HA.style "background" (colorAt i cfg.colors) ] [] ]
+                        )
+                        (Chart.bars cfg.values)
                     )
-                    (Chart.bars cfg.values)
                 )
 
         Chart.Bar ->
@@ -174,14 +176,55 @@ chartBody cfg =
             div [ HA.class "ss-chart-pie", HA.style "background" ("conic-gradient(" ++ stops ++ ")") ] []
 
         Chart.Line ->
-            let
-                poly =
-                    "polygon(0% 100%, "
-                        ++ String.join ", " (List.map (\( x, y ) -> pct (x * 100) ++ " " ++ pct (y * 100)) (Chart.linePoints cfg.values))
-                        ++ ", 100% 100%)"
-            in
-            div [ HA.class "ss-chart-line" ]
-                [ div [ HA.class "ss-chart-area", HA.style "clip-path" poly, HA.style "-webkit-clip-path" poly ] [] ]
+            plotted (lineArea "ss-chart-area" cfg.values)
+
+        Chart.Area ->
+            plotted (lineArea "ss-chart-area ss-chart-filled" cfg.values)
+
+        Chart.Scatter ->
+            plotted
+                (div [ HA.class "ss-chart-scatter" ]
+                    (List.indexedMap
+                        (\i ( x, y ) ->
+                            div
+                                [ HA.class "ss-chart-dot"
+                                , HA.style "left" (pct (x * 100))
+                                , HA.style "top" (pct (y * 100))
+                                , HA.style "background" (colorAt i cfg.colors)
+                                ]
+                                []
+                        )
+                        (Chart.scatterPoints (List.indexedMap (\i v -> ( toFloat i, v )) cfg.values))
+                    )
+                )
+
+
+{-| Wrap a cartesian chart body with a horizontal gridline overlay. -}
+plotted : Html msg -> Html msg
+plotted body =
+    div [ HA.class "ss-chart-plot" ] [ gridlines, body ]
+
+
+gridlines : Html msg
+gridlines =
+    div [ HA.class "ss-chart-grid" ]
+        (List.map
+            (\f -> div [ HA.class "ss-chart-gridline", HA.style "bottom" (pct (f * 100)) ] [])
+            (Chart.gridLevels 4)
+        )
+
+
+{-| The filled-area body of a line/area chart (a `clip-path` polygon under the points). -}
+lineArea : String -> List Float -> Html msg
+lineArea cls values =
+    let
+        poly =
+            "polygon(0% 100%, "
+                ++ String.join ", " (List.map (\( x, y ) -> pct (x * 100) ++ " " ++ pct (y * 100)) (Chart.linePoints values))
+                ++ ", 100% 100%)"
+    in
+    div [ HA.class "ss-chart-line" ]
+        [ div [ HA.class cls, HA.style "clip-path" poly, HA.style "-webkit-clip-path" poly ] [] ]
 
 
 chartLegend : { kind : Chart.Kind, title : String, labels : List String, values : List Float, colors : List String } -> Html msg

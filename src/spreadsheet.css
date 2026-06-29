@@ -819,6 +819,45 @@ th.ss-frozen-col {
     background: linear-gradient(to bottom, rgba(26, 115, 232, 0.55), rgba(26, 115, 232, 0.10));
 }
 
+.ss-chart-filled {
+    background: linear-gradient(to bottom, rgba(26, 115, 232, 0.85), rgba(26, 115, 232, 0.30));
+}
+
+/* Axis gridlines drawn behind a cartesian chart. */
+.ss-chart-plot {
+    position: relative;
+}
+
+.ss-chart-grid {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.ss-chart-gridline {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-top: 1px dashed #e8eaed;
+}
+
+/* Scatter plot: absolutely-positioned dots over the plot area. */
+.ss-chart-scatter {
+    position: relative;
+    height: 140px;
+    background: #fafbfd;
+    border-bottom: 1px solid var(--ss-border);
+}
+
+.ss-chart-dot {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    margin: -4px 0 0 -4px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px #fff;
+}
+
 .ss-chart-legend {
     display: flex;
     flex-wrap: wrap;
@@ -1241,4 +1280,29 @@ th.ss-frozen-col {
     align-items: center;
     gap: 6px;
     cursor: pointer;
+}
+
+/* Rendered multi-field pivot table (the science demo panel). */
+.ss-pivottable {
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: var(--ss-font);
+}
+
+.ss-pivottable th,
+.ss-pivottable td {
+    border: 1px solid var(--ss-border);
+    padding: 3px 10px;
+    text-align: right;
+}
+
+.ss-pivottable th {
+    background: var(--ss-header-bg);
+    color: var(--ss-header-fg);
+    font-weight: 600;
+}
+
+.ss-pivottable td:first-child,
+.ss-pivottable th:first-child {
+    text-align: left;
 }

@@ -21,6 +21,7 @@ Arguments arrive as `Arg`, which preserves whether each came from a single value
 
 -}
 
+import Bitwise
 import Spreadsheet.Regex as Regex
 import Spreadsheet.Value as Value exposing (Error(..), Value(..))
 
@@ -143,6 +144,17 @@ knownNames =
     -- statistics & forecasting
     , "CORREL", "SLOPE", "INTERCEPT", "RSQ", "FORECAST", "GEOMEAN", "HARMEAN"
     , "DEVSQ"
+
+    -- financial depth
+    , "RATE", "IPMT", "PPMT", "MIRR", "XNPV", "XIRR", "SLN", "DDB", "CUMIPMT"
+
+    -- statistical distributions
+    , "NORM.DIST", "NORM.S.DIST", "NORM.INV", "NORM.S.INV", "BINOM.DIST"
+    , "POISSON.DIST", "EXPON.DIST"
+
+    -- engineering, base & unit conversion
+    , "MDETERM", "DEC2BIN", "BIN2DEC", "DEC2HEX", "HEX2DEC", "DEC2OCT", "OCT2DEC"
+    , "BITAND", "BITOR", "BITXOR", "BITLSHIFT", "BITRSHIFT", "CONVERT"
 
     -- date & time
     , "TIME", "HOUR", "MINUTE", "SECOND", "EDATE", "EOMONTH", "WORKDAY"
@@ -721,6 +733,156 @@ call name args =
 
         "IRR" ->
             irrFn args
+
+        -- Financial depth -----------------------------------------------------
+        "RATE" ->
+            rateFn args
+
+        "IPMT" ->
+            ipmtFn args
+
+        "PPMT" ->
+            ppmtFn args
+
+        "MIRR" ->
+            mirrFn args
+
+        "XNPV" ->
+            xnpvFn args
+
+        "XIRR" ->
+            xirrFn args
+
+        "SLN" ->
+            case ( sc 0 args, sc 1 args, sc 2 args ) of
+                ( Just cost, Just salvage, Just life ) ->
+                    if life == 0 then
+                        VError DivZero
+
+                    else
+                        VNumber ((cost - salvage) / life)
+
+                _ ->
+                    VError ValueErr
+
+        "DDB" ->
+            ddbFn args
+
+        "CUMIPMT" ->
+            cumipmtFn args
+
+        -- Statistical distributions -------------------------------------------
+        "NORM.S.DIST" ->
+            case ( sc 0 args, boolArg 1 args ) of
+                ( Just z, cumulative ) ->
+                    VNumber (normSDist z cumulative)
+
+                _ ->
+                    VError ValueErr
+
+        "NORM.DIST" ->
+            case ( sc 0 args, sc 1 args, sc 2 args ) of
+                ( Just x, Just mean, Just sd ) ->
+                    if sd <= 0 then
+                        VError NumErr
+
+                    else
+                        VNumber (normSDist ((x - mean) / sd) (boolArg 3 args) / scaleFor (boolArg 3 args) sd)
+
+                _ ->
+                    VError ValueErr
+
+        "NORM.S.INV" ->
+            case sc 0 args of
+                Just p ->
+                    probResult (normSInv p)
+
+                _ ->
+                    VError ValueErr
+
+        "NORM.INV" ->
+            case ( sc 0 args, sc 1 args, sc 2 args ) of
+                ( Just p, Just mean, Just sd ) ->
+                    probResult (mean + sd * normSInv p)
+
+                _ ->
+                    VError ValueErr
+
+        "BINOM.DIST" ->
+            case ( sc 0 args, sc 1 args, sc 2 args ) of
+                ( Just k, Just n, Just p ) ->
+                    VNumber (binomDist (round k) (round n) p (boolArg 3 args))
+
+                _ ->
+                    VError ValueErr
+
+        "POISSON.DIST" ->
+            case ( sc 0 args, sc 1 args ) of
+                ( Just k, Just mean ) ->
+                    VNumber (poissonDist (round k) mean (boolArg 2 args))
+
+                _ ->
+                    VError ValueErr
+
+        "EXPON.DIST" ->
+            case ( sc 0 args, sc 1 args ) of
+                ( Just x, Just lambda ) ->
+                    if lambda <= 0 || x < 0 then
+                        VError NumErr
+
+                    else if boolArg 2 args then
+                        VNumber (1 - e ^ (-lambda * x))
+
+                    else
+                        VNumber (lambda * e ^ (-lambda * x))
+
+                _ ->
+                    VError ValueErr
+
+        -- Engineering, base & unit conversion ---------------------------------
+        "MDETERM" ->
+            case args of
+                a :: _ ->
+                    determinant (numbersMatrix (matrixOf a))
+
+                [] ->
+                    VError ValueErr
+
+        "DEC2BIN" ->
+            baseFromDec 2 args
+
+        "DEC2OCT" ->
+            baseFromDec 8 args
+
+        "DEC2HEX" ->
+            baseFromDec 16 args
+
+        "BIN2DEC" ->
+            baseToDec 2 args
+
+        "OCT2DEC" ->
+            baseToDec 8 args
+
+        "HEX2DEC" ->
+            baseToDec 16 args
+
+        "BITAND" ->
+            bitOp Bitwise.and args
+
+        "BITOR" ->
+            bitOp Bitwise.or args
+
+        "BITXOR" ->
+            bitOp Bitwise.xor args
+
+        "BITLSHIFT" ->
+            bitOp (\a n -> Bitwise.shiftLeftBy n a) args
+
+        "BITRSHIFT" ->
+            bitOp (\a n -> Bitwise.shiftRightZfBy n a) args
+
+        "CONVERT" ->
+            convertFn args
 
         -- Statistics & forecasting --------------------------------------------
         "CORREL" ->
@@ -4132,3 +4294,766 @@ covarianceFn args =
 
         _ ->
             VError ValueErr
+
+
+-- FINANCIAL DEPTH ------------------------------------------------------------
+
+
+{-| Read an argument as a truthy flag (the cumulative flag of a distribution); default True. -}
+boolArg : Int -> List Arg -> Bool
+boolArg i args =
+    case List.head (List.drop i args) of
+        Just a ->
+            Result.withDefault True (Value.toBool (firstValue a))
+
+        Nothing ->
+            True
+
+
+probResult : Float -> Value
+probResult x =
+    if isNaN x || isInfinite x then
+        VError NumErr
+
+    else
+        VNumber x
+
+
+{-| Newton's method for a 1-D root of `f` from `x0`; `Nothing` if it doesn't converge. -}
+solveNewton : (Float -> Float) -> Float -> Int -> Maybe Float
+solveNewton f x0 iters =
+    if iters <= 0 then
+        Nothing
+
+    else
+        let
+            fx =
+                f x0
+        in
+        if abs fx < 1.0e-9 then
+            Just x0
+
+        else
+            let
+                h =
+                    1.0e-6
+
+                deriv =
+                    (f (x0 + h) - fx) / h
+            in
+            if deriv == 0 then
+                Nothing
+
+            else
+                solveNewton f (x0 - fx / deriv) (iters - 1)
+
+
+rateFn : List Arg -> Value
+rateFn args =
+    case ( sc 0 args, sc 1 args, sc 2 args ) of
+        ( Just nperiods, Just payment, Just presentValue ) ->
+            let
+                fvv =
+                    opt 3 0 args
+
+                typ =
+                    opt 4 0 args
+
+                guess =
+                    opt 5 0.1 args
+
+                f r =
+                    if abs r < 1.0e-10 then
+                        presentValue + payment * nperiods + fvv
+
+                    else
+                        presentValue * (1 + r) ^ nperiods + payment * (1 + r * typ) * ((1 + r) ^ nperiods - 1) / r + fvv
+            in
+            case solveNewton f guess 100 of
+                Just r ->
+                    VNumber r
+
+                Nothing ->
+                    VError NumErr
+
+        _ ->
+            VError ValueErr
+
+
+{-| The interest portion of payment `per` of a loan (Excel `IPMT`). -}
+ipmtVal : Float -> Int -> Float -> Float -> Float -> Float -> Float
+ipmtVal rate per nperiods presentValue fvv typ =
+    if rate == 0 then
+        0
+
+    else
+        let
+            pay =
+                pmt rate nperiods presentValue fvv typ
+
+            balance k =
+                presentValue * (1 + rate) ^ toFloat k + pay * ((1 + rate) ^ toFloat k - 1) / rate
+        in
+        if per == 1 then
+            if typ == 1 then
+                0
+
+            else
+                -(presentValue * rate)
+
+        else
+            let
+                raw =
+                    -(balance (per - 1) * rate)
+            in
+            if typ == 1 then
+                raw / (1 + rate)
+
+            else
+                raw
+
+
+ipmtFn : List Arg -> Value
+ipmtFn args =
+    case ( sc 0 args, sc 1 args, sc 2 args, sc 3 args ) of
+        ( Just rate, Just perF, Just nperiods, Just presentValue ) ->
+            let
+                per =
+                    round perF
+            in
+            if per < 1 || toFloat per > nperiods then
+                VError NumErr
+
+            else
+                VNumber (ipmtVal rate per nperiods presentValue (opt 4 0 args) (opt 5 0 args))
+
+        _ ->
+            VError ValueErr
+
+
+ppmtFn : List Arg -> Value
+ppmtFn args =
+    case ( sc 0 args, sc 1 args, sc 2 args, sc 3 args ) of
+        ( Just rate, Just perF, Just nperiods, Just presentValue ) ->
+            let
+                per =
+                    round perF
+
+                fvv =
+                    opt 4 0 args
+
+                typ =
+                    opt 5 0 args
+            in
+            if per < 1 || toFloat per > nperiods then
+                VError NumErr
+
+            else
+                VNumber (pmt rate nperiods presentValue fvv typ - ipmtVal rate per nperiods presentValue fvv typ)
+
+        _ ->
+            VError ValueErr
+
+
+cumipmtFn : List Arg -> Value
+cumipmtFn args =
+    case ( sc 0 args, sc 1 args, sc 2 args ) of
+        ( Just rate, Just nperiods, Just presentValue ) ->
+            case ( sc 3 args, sc 4 args ) of
+                ( Just startF, Just endF ) ->
+                    let
+                        s =
+                            round startF
+
+                        en =
+                            round endF
+
+                        typ =
+                            opt 5 0 args
+                    in
+                    if s < 1 || en < s then
+                        VError NumErr
+
+                    else
+                        VNumber (List.sum (List.map (\p -> ipmtVal rate p nperiods presentValue 0 typ) (List.range s en)))
+
+                _ ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+ddbFn : List Arg -> Value
+ddbFn args =
+    case ( sc 0 args, sc 1 args, sc 2 args ) of
+        ( Just cost, Just salvage, Just life ) ->
+            case sc 3 args of
+                Just periodF ->
+                    let
+                        period =
+                            round periodF
+                    in
+                    if life <= 0 || period < 1 then
+                        VError NumErr
+
+                    else
+                        VNumber (ddbStep cost salvage life (opt 4 2 args) period 1 0)
+
+                Nothing ->
+                    VError ValueErr
+
+        _ ->
+            VError ValueErr
+
+
+ddbStep : Float -> Float -> Float -> Float -> Int -> Int -> Float -> Float
+ddbStep cost salvage life factor period i accum =
+    let
+        dep =
+            min ((cost - accum) * factor / life) (max 0 (cost - salvage - accum))
+    in
+    if i >= period then
+        dep
+
+    else
+        ddbStep cost salvage life factor period (i + 1) (accum + dep)
+
+
+mirrFn : List Arg -> Value
+mirrFn args =
+    case args of
+        valsArg :: _ ->
+            case orderedNumbers [ valsArg ] of
+                Ok nums ->
+                    let
+                        finRate =
+                            Maybe.withDefault 0 (sc 1 args)
+
+                        reinvRate =
+                            Maybe.withDefault 0 (sc 2 args)
+
+                        n =
+                            List.length nums
+
+                        pvNeg =
+                            List.sum (List.indexedMap (\i v -> ifLess0 v / (1 + finRate) ^ toFloat i) nums)
+
+                        fvPos =
+                            List.sum (List.indexedMap (\i v -> ifMore0 v * (1 + reinvRate) ^ toFloat (n - 1 - i)) nums)
+                    in
+                    if pvNeg == 0 || n < 2 then
+                        VError DivZero
+
+                    else
+                        VNumber ((-fvPos / pvNeg) ^ (1 / toFloat (n - 1)) - 1)
+
+                Err e ->
+                    VError e
+
+        _ ->
+            VError ValueErr
+
+
+ifLess0 : Float -> Float
+ifLess0 v =
+    if v < 0 then
+        v
+
+    else
+        0
+
+
+ifMore0 : Float -> Float
+ifMore0 v =
+    if v > 0 then
+        v
+
+    else
+        0
+
+
+argNums : Int -> List Arg -> Maybe (List Float)
+argNums i args =
+    Maybe.map (\a -> numbersOnly (flatten [ a ])) (List.head (List.drop i args))
+
+
+xnpvFn : List Arg -> Value
+xnpvFn args =
+    case ( sc 0 args, argNums 1 args, argNums 2 args ) of
+        ( Just rate, Just values, Just dates ) ->
+            case List.head dates of
+                Just d0 ->
+                    VNumber (List.sum (List.map2 (\v d -> v / (1 + rate) ^ ((d - d0) / 365)) values dates))
+
+                Nothing ->
+                    VError NumErr
+
+        _ ->
+            VError ValueErr
+
+
+xirrFn : List Arg -> Value
+xirrFn args =
+    case ( argNums 0 args, argNums 1 args ) of
+        ( Just values, Just dates ) ->
+            case List.head dates of
+                Just d0 ->
+                    let
+                        f r =
+                            List.sum (List.map2 (\v d -> v / (1 + r) ^ ((d - d0) / 365)) values dates)
+                    in
+                    case solveNewton f (opt 2 0.1 args) 100 of
+                        Just r ->
+                            VNumber r
+
+                        Nothing ->
+                            VError NumErr
+
+                Nothing ->
+                    VError NumErr
+
+        _ ->
+            VError ValueErr
+
+
+
+-- STATISTICAL DISTRIBUTIONS --------------------------------------------------
+
+
+scaleFor : Bool -> Float -> Float
+scaleFor cumulative sd =
+    if cumulative then
+        1
+
+    else
+        sd
+
+
+{-| The error function (Abramowitz & Stegun 7.1.26, |error| < 1.5e-7). -}
+erf : Float -> Float
+erf x =
+    let
+        t =
+            1 / (1 + 0.3275911 * abs x)
+
+        y =
+            1 - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t) * e ^ (-(x * x))
+    in
+    if x < 0 then
+        -y
+
+    else
+        y
+
+
+{-| Standard-normal density (`cumulative = False`) or CDF (`True`). -}
+normSDist : Float -> Bool -> Float
+normSDist z cumulative =
+    if cumulative then
+        0.5 * (1 + erf (z / sqrt 2))
+
+    else
+        e ^ (-(z * z) / 2) / sqrt (2 * pi)
+
+
+{-| Inverse standard-normal CDF (Acklam's rational approximation). -}
+normSInv : Float -> Float
+normSInv p =
+    if p <= 0 then
+        -1 / 0
+
+    else if p >= 1 then
+        1 / 0
+
+    else if p < 0.02425 then
+        let
+            q =
+                sqrt (-2 * logBase e p)
+        in
+        (((((invC 0 * q + invC 1) * q + invC 2) * q + invC 3) * q + invC 4) * q + invC 5)
+            / ((((invD 0 * q + invD 1) * q + invD 2) * q + invD 3) * q + 1)
+
+    else if p <= 0.97575 then
+        let
+            q =
+                p - 0.5
+
+            r =
+                q * q
+        in
+        (((((invA 0 * r + invA 1) * r + invA 2) * r + invA 3) * r + invA 4) * r + invA 5)
+            * q
+            / (((((invB 0 * r + invB 1) * r + invB 2) * r + invB 3) * r + invB 4) * r + 1)
+
+    else
+        let
+            q =
+                sqrt (-2 * logBase e (1 - p))
+        in
+        -(((((invC 0 * q + invC 1) * q + invC 2) * q + invC 3) * q + invC 4) * q + invC 5)
+            / ((((invD 0 * q + invD 1) * q + invD 2) * q + invD 3) * q + 1)
+
+
+invA : Int -> Float
+invA i =
+    nthCoef i [ -3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.38357751867269e2, -3.066479806614716e1, 2.506628277459239 ]
+
+
+invB : Int -> Float
+invB i =
+    nthCoef i [ -5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1 ]
+
+
+invC : Int -> Float
+invC i =
+    nthCoef i [ -7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783 ]
+
+
+invD : Int -> Float
+invD i =
+    nthCoef i [ 7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996, 3.754408661907416 ]
+
+
+nthCoef : Int -> List Float -> Float
+nthCoef i xs =
+    Maybe.withDefault 0 (List.head (List.drop i xs))
+
+
+binomDist : Int -> Int -> Float -> Bool -> Float
+binomDist k n p cumulative =
+    if cumulative then
+        List.sum (List.map (\i -> binomPmf i n p) (List.range 0 k))
+
+    else
+        binomPmf k n p
+
+
+binomPmf : Int -> Int -> Float -> Float
+binomPmf k n p =
+    combinF n k * p ^ toFloat k * (1 - p) ^ toFloat (n - k)
+
+
+combinF : Int -> Int -> Float
+combinF n k =
+    List.foldl (\i acc -> acc * toFloat (n - i) / toFloat (i + 1)) 1 (List.range 0 (k - 1))
+
+
+poissonDist : Int -> Float -> Bool -> Float
+poissonDist k mean cumulative =
+    if cumulative then
+        List.sum (List.map (\i -> poissonPmf i mean) (List.range 0 k))
+
+    else
+        poissonPmf k mean
+
+
+poissonPmf : Int -> Float -> Float
+poissonPmf k mean =
+    e ^ (-mean) * mean ^ toFloat k / factF k
+
+
+factF : Int -> Float
+factF n =
+    List.foldl (\i acc -> acc * toFloat i) 1 (List.range 1 n)
+
+
+
+-- ENGINEERING, BASE & UNIT CONVERSION ----------------------------------------
+
+
+numbersMatrix : List (List Value) -> List (List Float)
+numbersMatrix m =
+    List.map (List.map (\v -> Result.withDefault 0 (Value.toNumber v))) m
+
+
+determinant : List (List Float) -> Value
+determinant m =
+    let
+        n =
+            List.length m
+    in
+    if n == 0 || List.any (\row -> List.length row /= n) m then
+        VError ValueErr
+
+    else
+        VNumber (detCofactor m)
+
+
+detCofactor : List (List Float) -> Float
+detCofactor rows =
+    case rows of
+        [] ->
+            1
+
+        firstRow :: _ ->
+            if List.length firstRow == 1 then
+                Maybe.withDefault 0 (List.head firstRow)
+
+            else
+                List.sum
+                    (List.indexedMap
+                        (\j x ->
+                            (if modBy 2 j == 0 then
+                                1
+
+                             else
+                                -1
+                            )
+                                * x
+                                * detCofactor (List.map (removeAt j) (List.drop 1 rows))
+                        )
+                        firstRow
+                    )
+
+
+removeAt : Int -> List a -> List a
+removeAt j row =
+    List.take j row ++ List.drop (j + 1) row
+
+
+baseFromDec : Int -> List Arg -> Value
+baseFromDec radix args =
+    case sc 0 args of
+        Just nF ->
+            let
+                n =
+                    round nF
+            in
+            if n < 0 then
+                VError NumErr
+
+            else
+                let
+                    str =
+                        toBaseString radix n
+                in
+                case sc 1 args of
+                    Just placesF ->
+                        VText (String.padLeft (round placesF) '0' str)
+
+                    Nothing ->
+                        VText str
+
+        _ ->
+            VError ValueErr
+
+
+toBaseString : Int -> Int -> String
+toBaseString radix n =
+    if n == 0 then
+        "0"
+
+    else
+        String.fromList (toBaseDigits radix n [])
+
+
+toBaseDigits : Int -> Int -> List Char -> List Char
+toBaseDigits radix n acc =
+    if n <= 0 then
+        acc
+
+    else
+        toBaseDigits radix (n // radix) (digitChar (modBy radix n) :: acc)
+
+
+digitChar : Int -> Char
+digitChar d =
+    if d < 10 then
+        Char.fromCode (Char.toCode '0' + d)
+
+    else
+        Char.fromCode (Char.toCode 'A' + d - 10)
+
+
+baseToDec : Int -> List Arg -> Value
+baseToDec radix args =
+    case args of
+        a :: _ ->
+            case parseBase radix (String.toList (String.toUpper (Value.toText (firstValue a)))) 0 of
+                Just n ->
+                    VNumber (toFloat n)
+
+                Nothing ->
+                    VError NumErr
+
+        [] ->
+            VError ValueErr
+
+
+parseBase : Int -> List Char -> Int -> Maybe Int
+parseBase radix chars acc =
+    case chars of
+        [] ->
+            Just acc
+
+        c :: rest ->
+            case digitValue c of
+                Just d ->
+                    if d < radix then
+                        parseBase radix rest (acc * radix + d)
+
+                    else
+                        Nothing
+
+                Nothing ->
+                    Nothing
+
+
+digitValue : Char -> Maybe Int
+digitValue c =
+    if Char.isDigit c then
+        Just (Char.toCode c - Char.toCode '0')
+
+    else if c >= 'A' && c <= 'F' then
+        Just (Char.toCode c - Char.toCode 'A' + 10)
+
+    else
+        Nothing
+
+
+bitOp : (Int -> Int -> Int) -> List Arg -> Value
+bitOp f args =
+    case ( sc 0 args, sc 1 args ) of
+        ( Just a, Just b ) ->
+            VNumber (toFloat (f (round a) (round b)))
+
+        _ ->
+            VError ValueErr
+
+
+convertFn : List Arg -> Value
+convertFn args =
+    case ( sc 0 args, List.drop 1 args ) of
+        ( Just value, fromArg :: toArg :: _ ) ->
+            case convertUnits value (Value.toText (firstValue fromArg)) (Value.toText (firstValue toArg)) of
+                Just r ->
+                    VNumber r
+
+                Nothing ->
+                    VError NA
+
+        _ ->
+            VError ValueErr
+
+
+convertUnits : Float -> String -> String -> Maybe Float
+convertUnits value from to =
+    if isTemp from && isTemp to then
+        Just (toTemp to (fromTemp from value))
+
+    else
+        case ( unitFactor from, unitFactor to ) of
+            ( Just ( qa, fa ), Just ( qb, fb ) ) ->
+                if qa == qb then
+                    Just (value * fa / fb)
+
+                else
+                    Nothing
+
+            _ ->
+                Nothing
+
+
+isTemp : String -> Bool
+isTemp u =
+    List.member u [ "C", "F", "K", "cel", "fah", "kel" ]
+
+
+{-| A temperature to kelvin. -}
+fromTemp : String -> Float -> Float
+fromTemp u v =
+    case u of
+        "F" ->
+            (v - 32) * 5 / 9 + 273.15
+
+        "fah" ->
+            (v - 32) * 5 / 9 + 273.15
+
+        "C" ->
+            v + 273.15
+
+        "cel" ->
+            v + 273.15
+
+        _ ->
+            v
+
+
+{-| Kelvin to a temperature unit. -}
+toTemp : String -> Float -> Float
+toTemp u k =
+    case u of
+        "F" ->
+            (k - 273.15) * 9 / 5 + 32
+
+        "fah" ->
+            (k - 273.15) * 9 / 5 + 32
+
+        "C" ->
+            k - 273.15
+
+        "cel" ->
+            k - 273.15
+
+        _ ->
+            k
+
+
+{-| A unit's `(quantity, factor-to-base-unit)`, for linear conversions. -}
+unitFactor : String -> Maybe ( String, Float )
+unitFactor u =
+    case u of
+        "m" ->
+            Just ( "len", 1 )
+
+        "km" ->
+            Just ( "len", 1000 )
+
+        "cm" ->
+            Just ( "len", 0.01 )
+
+        "mm" ->
+            Just ( "len", 0.001 )
+
+        "in" ->
+            Just ( "len", 0.0254 )
+
+        "ft" ->
+            Just ( "len", 0.3048 )
+
+        "yd" ->
+            Just ( "len", 0.9144 )
+
+        "mi" ->
+            Just ( "len", 1609.344 )
+
+        "g" ->
+            Just ( "mass", 1 )
+
+        "kg" ->
+            Just ( "mass", 1000 )
+
+        "lbm" ->
+            Just ( "mass", 453.59237 )
+
+        "ozm" ->
+            Just ( "mass", 28.349523125 )
+
+        "sec" ->
+            Just ( "time", 1 )
+
+        "s" ->
+            Just ( "time", 1 )
+
+        "min" ->
+            Just ( "time", 60 )
+
+        "hr" ->
+            Just ( "time", 3600 )
+
+        "day" ->
+            Just ( "time", 86400 )
+
+        _ ->
+            Nothing
