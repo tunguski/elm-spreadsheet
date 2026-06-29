@@ -27,6 +27,7 @@ import Html.Events as HE
 import Json.Decode
 import Spreadsheet.Export as Export
 import Spreadsheet.Chart as Chart
+import Spreadsheet.Chrome as Chrome
 import Spreadsheet.Find as Find
 import Spreadsheet.Format as Format exposing (Format)
 import Spreadsheet.Pivot as Pivot
@@ -96,7 +97,45 @@ type alias Example =
     , dataRange : Ref.Range
     , wrapClass : String
     , css : Maybe String
+    , chrome : Bool
+    , hasMenuBar : Bool
+    , hasToolbar : Bool
+    , openMenu : Maybe String
+    , dialog : Maybe DialogKind
     }
+
+
+{-| The modal dialogs the chrome can open. -}
+type DialogKind
+    = AboutDlg
+    | NumFmtDlg
+    | FuncDlg
+
+
+{-| The actions a menu item or toolbar control can request. Routing them all through one
+`Chrome` message keeps "close the menus after any action" a single step. -}
+type ChromeAction
+    = CBold
+    | CItalic
+    | CUnderline
+    | CStrike
+    | CAlign Style.Align
+    | CUndo
+    | CRedo
+    | CCopy
+    | CPaste
+    | CInsertRow
+    | CInsertCol
+    | CSortAsc
+    | CSortDesc
+    | CClear
+    | CSetNumFmt Format
+    | CInsertFunc String
+    | COpen DialogKind
+    | CCloseDialog
+    | CToggleMenuBar
+    | CToggleToolbar
+    | CNone
 
 
 init : () -> ( Model, Cmd Msg )
@@ -116,6 +155,7 @@ init _ =
             , exDynamic
             , exFunctional
             , exQuery
+            , exChrome
             , exAsync
             ]
       , drag = Nothing
@@ -179,6 +219,10 @@ type Msg
     | SetFilterValue Int String
     | ClearFilter Int
     | SpillUnique Int
+      -- application chrome (menu bar / toolbar / dialogs)
+    | OpenMenu Int String
+    | CloseMenus Int
+    | ChromeMsg Int ChromeAction
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -360,8 +404,115 @@ update msg model =
         SpillUnique id ->
             ( mapExample id spillUnique model, Cmd.none )
 
+        OpenMenu id label ->
+            ( mapExample id (\e -> { e | openMenu = toggleMenu label e.openMenu }) model, Cmd.none )
+
+        CloseMenus id ->
+            ( mapExample id (\e -> { e | openMenu = Nothing }) model, Cmd.none )
+
+        ChromeMsg id action ->
+            -- Any menu/toolbar action first closes the open menu, then runs.
+            applyChrome id action (mapExample id (\e -> { e | openMenu = Nothing }) model)
+
         Frame _ ->
             ( { model | examples = List.map stepExample model.examples }, Cmd.none )
+
+
+toggleMenu : String -> Maybe String -> Maybe String
+toggleMenu label current =
+    if current == Just label then
+        Nothing
+
+    else
+        Just label
+
+
+{-| Run a menu/toolbar action against the example's selection, reusing the same edits the
+existing toolbars use. Dialog-opening actions just set `dialog`; the apply/close actions
+clear it. -}
+applyChrome : Int -> ChromeAction -> Model -> ( Model, Cmd Msg )
+applyChrome id action model =
+    case action of
+        CBold ->
+            ( restyle id Style.toggleBold model, focusGrid id )
+
+        CItalic ->
+            ( restyle id Style.toggleItalic model, focusGrid id )
+
+        CUnderline ->
+            ( restyle id Style.toggleUnderline model, focusGrid id )
+
+        CStrike ->
+            ( restyle id Style.toggleStrike model, focusGrid id )
+
+        CAlign a ->
+            ( restyle id (Style.withAlign a) model, focusGrid id )
+
+        CUndo ->
+            ( mapExample id undo model, focusGrid id )
+
+        CRedo ->
+            ( mapExample id redo model, focusGrid id )
+
+        CCopy ->
+            ( mapExample id copySel model, focusGrid id )
+
+        CPaste ->
+            ( mapExample id pasteSel model, focusGrid id )
+
+        CInsertRow ->
+            ( mapExample id (structuralEdit (\e -> Sheet.insertRows e.selected.row 1 e.sheet)) model, focusGrid id )
+
+        CInsertCol ->
+            ( mapExample id (structuralEdit (\e -> Sheet.insertCols e.selected.col 1 e.sheet)) model, focusGrid id )
+
+        CSortAsc ->
+            ( mapExample id (structuralEdit (\e -> Sheet.sortRange e.dataRange e.selected.col True e.sheet)) model, focusGrid id )
+
+        CSortDesc ->
+            ( mapExample id (structuralEdit (\e -> Sheet.sortRange e.dataRange e.selected.col False e.sheet)) model, focusGrid id )
+
+        CClear ->
+            ( mapExample id clearSheet model, focusGrid id )
+
+        CSetNumFmt fmt ->
+            ( mapExample id (\e -> { e | dialog = Nothing, sheet = applyNumFmt e fmt }) model, focusGrid id )
+
+        CInsertFunc name ->
+            ( mapExample id (\e -> { e | dialog = Nothing, editing = Just ( e.selected, "=" ++ name ++ "(" ) }) model, focusEdit id )
+
+        COpen kind ->
+            ( mapExample id (\e -> { e | dialog = Just kind }) model, Cmd.none )
+
+        CCloseDialog ->
+            ( mapExample id (\e -> { e | dialog = Nothing }) model, Cmd.none )
+
+        CToggleMenuBar ->
+            ( mapExample id (\e -> { e | hasMenuBar = not e.hasMenuBar }) model, Cmd.none )
+
+        CToggleToolbar ->
+            ( mapExample id (\e -> { e | hasToolbar = not e.hasToolbar }) model, Cmd.none )
+
+        CNone ->
+            ( model, Cmd.none )
+
+
+clearSheet : Example -> Example
+clearSheet e =
+    let
+        e1 =
+            record e
+
+        ( rows, cols ) =
+            Sheet.dims e.sheet
+    in
+    { e1 | sheet = Sheet.empty rows cols, editing = Nothing }
+
+
+{-| Apply a number format to every cell of the current selection. -}
+applyNumFmt : Example -> Format -> Sheet
+applyNumFmt e fmt =
+    List.foldl (\r s -> Sheet.setFormat r fmt s) e.sheet (Ref.cellsOf (selectionOf e))
 
 
 mapExample : Int -> (Example -> Example) -> Model -> Model
@@ -1038,6 +1189,11 @@ example id title blurb cols rows sheet =
     , dataRange = { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } }
     , wrapClass = ""
     , css = Nothing
+    , chrome = False
+    , hasMenuBar = True
+    , hasToolbar = True
+    , openMenu = Nothing
+    , dialog = Nothing
     }
 
 
@@ -1551,6 +1707,11 @@ exAsync =
     , dataRange = { start = { col = 0, row = 0 }, end = { col = 0, row = 0 } }
     , wrapClass = ""
     , css = Nothing
+    , chrome = False
+    , hasMenuBar = True
+    , hasToolbar = True
+    , openMenu = Nothing
+    , dialog = Nothing
     }
 
 
@@ -1612,6 +1773,11 @@ exampleView selecting e =
                     ]
               , p [ HA.class "ex-blurb" ] [ text e.blurb ]
               ]
+            , if e.chrome then
+                chromeView e
+
+              else
+                []
             , if e.toolbar then
                 [ formattingToolbar e ]
 
@@ -1641,6 +1807,11 @@ exampleView selecting e =
             , [ asyncControls e ]
             , styleNode e.css
             , [ div [ HA.class (gridClass e) ] [ View.view (gridConfig (selecting == Just e.id) e) e.sheet ] ]
+            , if e.chrome then
+                dialogView e
+
+              else
+                []
             , if e.frozenRows > 0 then
                 [ pivotPanel e, chartsPanel e ]
 
@@ -2044,6 +2215,282 @@ asyncControls e =
 
     else
         text ""
+
+
+-- APPLICATION CHROME (menu bar / toolbar / dialogs) --------------------------
+
+
+{-| The chrome rows above the grid: a config strip (so you can toggle the bars), then the
+menu bar and/or toolbar according to the example's flags. -}
+chromeView : Example -> List (Html Msg)
+chromeView e =
+    List.concat
+        [ [ uiConfigStrip e ]
+        , if e.hasMenuBar then
+            [ Chrome.menuBar
+                { menus = chromeMenus e
+                , open = e.openMenu
+                , onOpen = OpenMenu e.id
+                , onClose = CloseMenus e.id
+                }
+            ]
+
+          else
+            []
+        , if e.hasToolbar then
+            [ Chrome.toolbar (chromeTools e) ]
+
+          else
+            []
+        ]
+
+
+{-| The small "is there a menu bar / toolbar" config strip — the headline of the feature. -}
+uiConfigStrip : Example -> Html Msg
+uiConfigStrip e =
+    div [ HA.class "ss-ui-config" ]
+        [ span [] [ text "Chrome:" ]
+        , label []
+            [ input [ HA.type_ "checkbox", HA.checked e.hasMenuBar, HE.onClick (ChromeMsg e.id CToggleMenuBar) ] []
+            , text "Menu bar"
+            ]
+        , label []
+            [ input [ HA.type_ "checkbox", HA.checked e.hasToolbar, HE.onClick (ChromeMsg e.id CToggleToolbar) ] []
+            , text "Toolbar"
+            ]
+        , span [ HA.class "fmt-cell" ] [ text (Ref.toA1 e.selected) ]
+        ]
+
+
+{-| The menu-bar content, Google-Sheets style (File / Edit / View / Insert / Format / Data /
+Help). Every leaf carries a `ChromeMsg`, so selecting one closes the menus and runs. -}
+chromeMenus : Example -> List (Chrome.Menu Msg)
+chromeMenus e =
+    let
+        cur =
+            Sheet.baseStyleAt e.selected e.sheet
+
+        act =
+            ChromeMsg e.id
+
+        cmd label keys enabled action =
+            Chrome.Item { label = label, shortcut = keys, enabled = enabled, onSelect = act action }
+    in
+    [ { label = "File"
+      , items =
+            [ cmd "New (clear sheet)" "" True CClear
+            , Chrome.Divider
+            , cmd "About elm-spreadsheet" "" True (COpen AboutDlg)
+            ]
+      }
+    , { label = "Edit"
+      , items =
+            [ cmd "Undo" "Ctrl+Z" (not (List.isEmpty e.past)) CUndo
+            , cmd "Redo" "Ctrl+Y" (not (List.isEmpty e.future)) CRedo
+            , Chrome.Divider
+            , cmd "Copy" "Ctrl+C" True CCopy
+            , cmd "Paste" "Ctrl+V" (e.clip /= Nothing) CPaste
+            ]
+      }
+    , { label = "View"
+      , items =
+            [ Chrome.Check { label = "Menu bar", checked = e.hasMenuBar, onSelect = act CToggleMenuBar }
+            , Chrome.Check { label = "Toolbar", checked = e.hasToolbar, onSelect = act CToggleToolbar }
+            ]
+      }
+    , { label = "Insert"
+      , items =
+            [ cmd "Row above" "" True CInsertRow
+            , cmd "Column left" "" True CInsertCol
+            , Chrome.Divider
+            , cmd "Function…" "" True (COpen FuncDlg)
+            ]
+      }
+    , { label = "Format"
+      , items =
+            [ Chrome.Check { label = "Bold", checked = Style.isBold cur, onSelect = act CBold }
+            , Chrome.Check { label = "Italic", checked = Style.isItalic cur, onSelect = act CItalic }
+            , Chrome.Check { label = "Underline", checked = Style.isUnderline cur, onSelect = act CUnderline }
+            , Chrome.Divider
+            , Chrome.SubMenu "Align"
+                [ cmd "Left" "" True (CAlign Style.AlignLeft)
+                , cmd "Center" "" True (CAlign Style.AlignCenter)
+                , cmd "Right" "" True (CAlign Style.AlignRight)
+                ]
+            , Chrome.Divider
+            , cmd "Number format…" "" True (COpen NumFmtDlg)
+            ]
+      }
+    , { label = "Data"
+      , items =
+            [ cmd "Sort sheet A → Z" "" True CSortAsc
+            , cmd "Sort sheet Z → A" "" True CSortDesc
+            ]
+      }
+    , { label = "Help"
+      , items =
+            [ cmd "Function list…" "" True (COpen FuncDlg)
+            , cmd "About" "" True (COpen AboutDlg)
+            ]
+      }
+    ]
+
+
+{-| The toolbar content: undo/redo, a number-format picker, bold/italic/underline/strike,
+alignment and a couple of insert actions — each reusing the same actions as the menus. -}
+chromeTools : Example -> List (Chrome.ToolItem Msg)
+chromeTools e =
+    let
+        cur =
+            Sheet.baseStyleAt e.selected e.sheet
+
+        act =
+            ChromeMsg e.id
+    in
+    [ Chrome.Tool { icon = "↶", title = "Undo", enabled = not (List.isEmpty e.past), onClick = act CUndo }
+    , Chrome.Tool { icon = "↷", title = "Redo", enabled = not (List.isEmpty e.future), onClick = act CRedo }
+    , Chrome.Gap
+    , Chrome.Pick { title = "Number format", value = "", options = numFmtOptions, onPick = \s -> act (CSetNumFmt (numFmtOf s)) }
+    , Chrome.Gap
+    , Chrome.Toggle { icon = "B", title = "Bold", active = Style.isBold cur, onClick = act CBold }
+    , Chrome.Toggle { icon = "I", title = "Italic", active = Style.isItalic cur, onClick = act CItalic }
+    , Chrome.Toggle { icon = "U", title = "Underline", active = Style.isUnderline cur, onClick = act CUnderline }
+    , Chrome.Toggle { icon = "S", title = "Strikethrough", active = Style.isStrike cur, onClick = act CStrike }
+    , Chrome.Gap
+    , Chrome.Toggle { icon = "⇤", title = "Align left", active = Style.alignOf cur == Just Style.AlignLeft, onClick = act (CAlign Style.AlignLeft) }
+    , Chrome.Toggle { icon = "↔", title = "Align center", active = Style.alignOf cur == Just Style.AlignCenter, onClick = act (CAlign Style.AlignCenter) }
+    , Chrome.Toggle { icon = "⇥", title = "Align right", active = Style.alignOf cur == Just Style.AlignRight, onClick = act (CAlign Style.AlignRight) }
+    , Chrome.Gap
+    , Chrome.Tool { icon = "＋", title = "Insert row above", enabled = True, onClick = act CInsertRow }
+    , Chrome.Tool { icon = "A↓Z", title = "Sort ascending", enabled = True, onClick = act CSortAsc }
+    , Chrome.Tool { icon = "ƒx", title = "Insert function", enabled = True, onClick = act (COpen FuncDlg) }
+    ]
+
+
+numFmtOptions : List ( String, String )
+numFmtOptions =
+    [ ( "auto", "123" ), ( "number", "1,000.00" ), ( "currency", "$ Currency" ), ( "percent", "% Percent" ), ( "date", "Date" ) ]
+
+
+numFmtOf : String -> Format
+numFmtOf s =
+    case s of
+        "number" ->
+            Format.Number 2 True
+
+        "currency" ->
+            Format.Currency "$" 2
+
+        "percent" ->
+            Format.Percent 0
+
+        "date" ->
+            Format.DateTime "yyyy-mm-dd"
+
+        _ ->
+            Format.General
+
+
+{-| The modal dialog overlay, when one is open. -}
+dialogView : Example -> List (Html Msg)
+dialogView e =
+    case e.dialog of
+        Nothing ->
+            []
+
+        Just kind ->
+            [ Chrome.dialog (dialogFor e kind) ]
+
+
+dialogFor : Example -> DialogKind -> Chrome.Dialog Msg
+dialogFor e kind =
+    let
+        close =
+            ChromeMsg e.id CCloseDialog
+    in
+    case kind of
+        AboutDlg ->
+            { title = "About elm-spreadsheet"
+            , body =
+                [ p [] [ text "A recalculating spreadsheet engine and view layer written in Elm — ~195 functions, dynamic arrays, LAMBDA, structured tables, querying and more." ]
+                , p [] [ text "This menu bar, toolbar and dialog are the reusable Spreadsheet.Chrome module: declarative, configurable (toggle either bar in the View menu) and styled entirely with CSS classes." ]
+                ]
+            , actions = [ button [ HA.class "ss-dlg-btn ss-dlg-btn-primary", HE.onClick close ] [ text "Close" ] ]
+            , onClose = close
+            }
+
+        NumFmtDlg ->
+            { title = "Number format"
+            , body =
+                [ p [] [ text ("Apply a format to " ++ selectionLabel e ++ ":") ]
+                , div [ HA.class "ss-dlg-grid" ] (List.map (numFmtChip e) numFmtPresets)
+                ]
+            , actions = [ button [ HA.class "ss-dlg-btn", HE.onClick close ] [ text "Cancel" ] ]
+            , onClose = close
+            }
+
+        FuncDlg ->
+            { title = "Insert function"
+            , body =
+                [ p [] [ text ("Start a formula in " ++ Ref.toA1 e.selected ++ ":") ]
+                , div [ HA.class "ss-dlg-grid" ] (List.map (funcChip e) funcList)
+                ]
+            , actions = [ button [ HA.class "ss-dlg-btn", HE.onClick close ] [ text "Cancel" ] ]
+            , onClose = close
+            }
+
+
+numFmtPresets : List ( String, Format )
+numFmtPresets =
+    [ ( "General", Format.General )
+    , ( "Number (1,000.00)", Format.Number 2 True )
+    , ( "Currency ($)", Format.Currency "$" 2 )
+    , ( "Percent (0%)", Format.Percent 0 )
+    , ( "Date (yyyy-mm-dd)", Format.DateTime "yyyy-mm-dd" )
+    ]
+
+
+numFmtChip : Example -> ( String, Format ) -> Html Msg
+numFmtChip e ( lbl, fmt ) =
+    button [ HA.class "ss-dlg-btn", HE.onClick (ChromeMsg e.id (CSetNumFmt fmt)) ] [ text lbl ]
+
+
+funcList : List String
+funcList =
+    [ "SUM", "AVERAGE", "COUNT", "IF", "VLOOKUP", "SORT", "FILTER", "UNIQUE", "GROUPBY", "TEXTJOIN", "REGEXEXTRACT", "LAMBDA" ]
+
+
+funcChip : Example -> String -> Html Msg
+funcChip e name =
+    button [ HA.class "ss-dlg-btn", HE.onClick (ChromeMsg e.id (CInsertFunc name)) ] [ text name ]
+
+
+{-| 16 — a full, configurable application chrome built from Spreadsheet.Chrome. -}
+exChrome : Example
+exChrome =
+    let
+        e =
+            example 16
+                "Configurable menu bar, toolbar & dialogs"
+                "A full application chrome modelled on web office suites (Google Sheets / Excel for the web), built from the reusable Spreadsheet.Chrome module. The menu bar (File / Edit / View / Insert / Format / Data / Help) and the toolbar both act on the selected cell — try Bold, the number-format picker, Insert ▸ Function… or Format ▸ Number format…. Both bars are optional: toggle them with the checkboxes (or the View menu). The “About”, “Number format” and “Insert function” dialogs are modal overlays from the same module."
+                6
+                6
+                chromeSheet
+    in
+    { e | chrome = True, selected = ref "B2", anchor = ref "B2", dataRange = rangeOf "A2" "D5" }
+
+
+chromeSheet : Sheet
+chromeSheet =
+    build 12 6
+        [ ( "A1", "Item" ), ( "B1", "Qty" ), ( "C1", "Price" ), ( "D1", "Total" )
+        , ( "A2", "Apples" ), ( "B2", "12" ), ( "C2", "0.5" ), ( "D2", "=B2*C2" )
+        , ( "A3", "Bread" ), ( "B3", "3" ), ( "C3", "2.2" ), ( "D3", "=B3*C3" )
+        , ( "A4", "Coffee" ), ( "B4", "2" ), ( "C4", "8.9" ), ( "D4", "=B4*C4" )
+        , ( "A5", "Eggs" ), ( "B5", "24" ), ( "C5", "0.2" ), ( "D5", "=B5*C5" )
+        ]
+        |> withStyle (cells "A1" "D1") (\s -> { s | bold = True })
+        |> Sheet.recalcAll
 
 
 gridConfig : Bool -> Example -> View.Config Msg
