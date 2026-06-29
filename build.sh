@@ -3,8 +3,9 @@
 # build.sh — compile the elm-spreadsheet demo app to a standalone HTML file.
 #
 # The elm.sh wrapper chdirs to the elm-lang repo root before running, so every path passed
-# to `make` must be absolute (computed here after we cd into the script's own dir). Like the
-# other elm-lang example apps we compile with --no-check.
+# to `make` must be absolute (computed here after we cd into the script's own dir). We compile
+# with the type checker ON (no --no-check): the whole app — View/SheetDoc/Examples and the
+# vendored Workspace — type-checks clean, so the checker is a real gate again.
 #
 #   ELM=../../elm.sh ./build.sh
 #
@@ -17,7 +18,7 @@ P="$(pwd)"
 
 mkdir -p "$OUT"
 echo "Compiling elm-spreadsheet with: $ELM"
-$ELM make "$P/src/Main.elm" --project="$P/elm.json" -o "$P/$OUT/elm-spreadsheet.html" --no-check
+$ELM make "$P/src/Main.elm" --project="$P/elm.json" -o "$P/$OUT/elm-spreadsheet.html"
 
 # The compiler owns the output's <head> (just charset + title), so we post-process it: add a
 # viewport meta and inline src/spreadsheet.css as a <style> (the library's styling lives there
