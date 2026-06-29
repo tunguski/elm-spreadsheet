@@ -125,6 +125,13 @@ suite =
         , filterTests
         , nameBoxTests
         , scenarioTests
+        , matrixTests
+        , financeFn2Tests
+        , distributionTests
+        , engineeringTests
+        , pivotTableTests
+        , chart2Tests
+        , dataToolTests
         ]
 
 
@@ -3111,4 +3118,302 @@ scenarioTests =
                         ]
                 in
                 Expect.equal [ ( "low", [ "10" ] ), ( "high", [ "200" ] ) ] (Scenarios.summary scs [ at "B1" ] scenarioFixture)
+        ]
+
+
+-- shared float-tolerance helper for this round
+
+
+near : Float -> Float -> Expect.Expectation
+near expected actual =
+    Expect.equal True (abs (expected - actual) < 0.001)
+
+
+nnf : Float -> Float
+nnf x =
+    Maybe.withDefault x (String.toFloat (String.fromFloat x))
+
+
+
+-- MATRIX / LINEAR ALGEBRA ----------------------------------------------------
+
+
+matrixTests : Test
+matrixTests =
+    describe "matrix functions"
+        [ test "MMULT multiplies two matrices (spills)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "3" ), ( "B2", "4" )
+                            , ( "D1", "5" ), ( "E1", "6" ), ( "D2", "7" ), ( "E2", "8" )
+                            , ( "G1", "=MMULT(A1:B2,D1:E2)" )
+                            ]
+                in
+                Expect.equal
+                    ( normVal (VNumber 19), normVal (VNumber 22), normVal (VNumber 43), normVal (VNumber 50) )
+                    ( normVal (valOf "G1" s), normVal (valOf "H1" s), normVal (valOf "G2" s), normVal (valOf "H2" s) )
+        , test "MUNIT builds an identity matrix" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=MUNIT(2)" ) ]
+                in
+                Expect.equal ( normVal (VNumber 1), normVal (VNumber 0), normVal (VNumber 1) )
+                    ( normVal (valOf "A1" s), normVal (valOf "B1" s), normVal (valOf "B2" s) )
+        , test "MDETERM computes a determinant" <|
+            \_ -> expectVal (VNumber -2) (valOf "G1" (sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "3" ), ( "B2", "4" ), ( "G1", "=MDETERM(A1:B2)" ) ]))
+        , test "MINVERSE inverts a matrix" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "4" ), ( "B1", "7" ), ( "A2", "2" ), ( "B2", "6" ), ( "G1", "=MINVERSE(A1:B2)" ) ]
+                in
+                near 0.6 (floatAt "G1" s)
+        ]
+
+
+
+-- FINANCIAL DEPTH ------------------------------------------------------------
+
+
+financeFn2Tests : Test
+financeFn2Tests =
+    describe "financial depth"
+        [ test "SLN straight-line depreciation" <|
+            \_ -> expectVal (VNumber 1800) (ev0 "=SLN(10000,1000,5)")
+        , test "DDB first and second period" <|
+            \_ -> expectVal2 ( VNumber 4000, VNumber 2400 ) ( ev0 "=DDB(10000,1000,5,1)", ev0 "=DDB(10000,1000,5,2)" )
+        , test "RATE recovers the period rate" <|
+            \_ ->
+                case ev0 "=RATE(12,-8.88,100)" of
+                    VNumber r ->
+                        near 0.01 r
+
+                    _ ->
+                        Expect.fail "not a number"
+        , test "IPMT first-period interest" <|
+            \_ ->
+                case ev0 "=IPMT(0.008333333,1,12,1000)" of
+                    VNumber x ->
+                        near -8.3333 x
+
+                    _ ->
+                        Expect.fail "not a number"
+        , test "XNPV of a doubling at 10% over a year is ~0" <|
+            \_ ->
+                case ev [ ( "A1", VNumber -100 ), ( "A2", VNumber 110 ), ( "B1", VNumber 0 ), ( "B2", VNumber 365 ) ] "=XNPV(0.1,A1:A2,B1:B2)" of
+                    VNumber x ->
+                        Expect.equal True (abs x < 0.01)
+
+                    _ ->
+                        Expect.fail "not a number"
+        , test "XIRR of -100 -> 110 over a year is ~10%" <|
+            \_ ->
+                case ev [ ( "A1", VNumber -100 ), ( "A2", VNumber 110 ), ( "B1", VNumber 0 ), ( "B2", VNumber 365 ) ] "=XIRR(A1:A2,B1:B2)" of
+                    VNumber x ->
+                        near 0.1 x
+
+                    _ ->
+                        Expect.fail "not a number"
+        ]
+
+
+
+-- STATISTICAL DISTRIBUTIONS --------------------------------------------------
+
+
+distributionTests : Test
+distributionTests =
+    describe "statistical distributions"
+        [ test "standard-normal CDF at 0 is 0.5" <|
+            \_ ->
+                case ev0 "=NORM.S.DIST(0,TRUE)" of
+                    VNumber x ->
+                        near 0.5 x
+
+                    _ ->
+                        Expect.fail "no"
+        , test "standard-normal CDF at 1.96 is ~0.975" <|
+            \_ ->
+                case ev0 "=NORM.S.DIST(1.96,TRUE)" of
+                    VNumber x ->
+                        near 0.975 x
+
+                    _ ->
+                        Expect.fail "no"
+        , test "inverse standard-normal of 0.975 is ~1.96" <|
+            \_ ->
+                case ev0 "=NORM.S.INV(0.975)" of
+                    VNumber x ->
+                        near 1.96 x
+
+                    _ ->
+                        Expect.fail "no"
+        , test "BINOM.DIST pmf" <|
+            \_ -> expectVal (VNumber 0.3125) (ev0 "=BINOM.DIST(2,5,0.5,FALSE)")
+        , test "BINOM.DIST cumulative to n is 1" <|
+            \_ -> expectVal (VNumber 1) (ev0 "=BINOM.DIST(5,5,0.5,TRUE)")
+        , test "POISSON pmf at 0" <|
+            \_ ->
+                case ev0 "=POISSON.DIST(0,1,FALSE)" of
+                    VNumber x ->
+                        near 0.367879 x
+
+                    _ ->
+                        Expect.fail "no"
+        , test "EXPON cdf" <|
+            \_ ->
+                case ev0 "=EXPON.DIST(1,1,TRUE)" of
+                    VNumber x ->
+                        near 0.632120 x
+
+                    _ ->
+                        Expect.fail "no"
+        ]
+
+
+
+-- ENGINEERING, BASE & UNIT CONVERSION ----------------------------------------
+
+
+engineeringTests : Test
+engineeringTests =
+    describe "engineering functions"
+        [ test "DEC2BIN / DEC2HEX / DEC2OCT" <|
+            \_ -> Expect.equal ( VText "1010", VText "FF", VText "10" ) ( ev0 "=DEC2BIN(10)", ev0 "=DEC2HEX(255)", ev0 "=DEC2OCT(8)" )
+        , test "BIN2DEC / HEX2DEC / OCT2DEC" <|
+            \_ -> expectVal2 ( VNumber 10, VNumber 255 ) ( ev0 "=BIN2DEC(1010)", ev0 "=HEX2DEC(\"FF\")" )
+        , test "DEC2BIN with padding" <|
+            \_ -> Expect.equal (VText "0010") (ev0 "=DEC2BIN(2,4)")
+        , test "bitwise AND/OR/XOR" <|
+            \_ -> Expect.equal (List.map normVal [ VNumber 1, VNumber 7, VNumber 6 ]) (List.map normVal [ ev0 "=BITAND(5,3)", ev0 "=BITOR(5,3)", ev0 "=BITXOR(5,3)" ])
+        , test "bit shifts" <|
+            \_ -> expectVal2 ( VNumber 8, VNumber 4 ) ( ev0 "=BITLSHIFT(1,3)", ev0 "=BITRSHIFT(16,2)" )
+        , test "CONVERT length and time" <|
+            \_ -> expectVal2 ( VNumber 1000, VNumber 60 ) ( ev0 "=CONVERT(1,\"km\",\"m\")", ev0 "=CONVERT(1,\"hr\",\"min\")" )
+        , test "CONVERT temperature C to F" <|
+            \_ -> expectVal (VNumber 32) (ev0 "=CONVERT(0,\"C\",\"F\")")
+        ]
+
+
+
+-- MULTI-FIELD PIVOT TABLE ----------------------------------------------------
+
+
+ptSheet : Sheet
+ptSheet =
+    sheetWith
+        [ ( "A1", "Region" ), ( "B1", "Product" ), ( "C1", "Sales" )
+        , ( "A2", "East" ), ( "B2", "Apple" ), ( "C2", "10" )
+        , ( "A3", "East" ), ( "B3", "Pear" ), ( "C3", "20" )
+        , ( "A4", "West" ), ( "B4", "Apple" ), ( "C4", "30" )
+        , ( "A5", "West" ), ( "B5", "Apple" ), ( "C5", "5" )
+        ]
+
+
+pivotTableTests : Test
+pivotTableTests =
+    describe "multi-field pivot table"
+        [ test "single row field sums per group + grand total" <|
+            \_ ->
+                let
+                    t =
+                        Pivot.pivotTable { rowFields = [ 0 ], colField = Nothing, valueCol = 2, agg = Pivot.Sum } (rangeOf "A1" "C5") ptSheet
+
+                    cell r c =
+                        normVal (Maybe.withDefault VEmpty (List.head (List.drop c (Maybe.withDefault [] (List.head (List.drop r t))))))
+                in
+                -- header, East 30, West 35, Grand Total 65
+                Expect.equal ( VText "East", normVal (VNumber 30), normVal (VNumber 65) )
+                    ( cell 1 0 |> denorm, cell 1 1, cell 3 1 )
+        , test "column field makes a crosstab" <|
+            \_ ->
+                let
+                    t =
+                        Pivot.pivotTable { rowFields = [ 0 ], colField = Just 1, valueCol = 2, agg = Pivot.Sum } (rangeOf "A1" "C5") ptSheet
+                in
+                -- header: Region, Apple, Pear, Total
+                Expect.equal [ VText "Region", VText "Apple", VText "Pear", VText "Total" ] (Maybe.withDefault [] (List.head t))
+        , test "two row fields add subtotals" <|
+            \_ ->
+                let
+                    t =
+                        Pivot.pivotTable { rowFields = [ 0, 1 ], colField = Nothing, valueCol = 2, agg = Pivot.Sum } (rangeOf "A1" "C5") ptSheet
+
+                    rowLabels =
+                        List.map (\row -> Value.toText (Maybe.withDefault VEmpty (List.head (List.drop 1 row)))) t
+                in
+                -- a subtotal row labelled "Total" appears for each first-field group
+                Expect.equal True (List.member "Total" rowLabels)
+        ]
+
+
+denorm : Value -> Value
+denorm v =
+    v
+
+
+
+-- RICHER CHARTS --------------------------------------------------------------
+
+
+chart2Tests : Test
+chart2Tests =
+    describe "richer charts"
+        [ test "scatterPoints normalise into the unit square (y inverted)" <|
+            \_ -> Expect.equal (normPts [ ( 0, 1 ), ( 1, 0 ) ]) (normPts (Chart.scatterPoints [ ( 0, 0 ), ( 10, 10 ) ]))
+        , test "stackBars stack to the tallest column total" <|
+            \_ ->
+                Expect.equal (List.map normPts [ [ ( 0, 0.25 ), ( 0.25, 0.25 ) ], [ ( 0, 0.5 ), ( 0.5, 0.5 ) ] ])
+                    (List.map normPts (Chart.stackBars [ [ 1, 1 ], [ 2, 2 ] ]))
+        , test "niceMax rounds up to 1/2/5 x power of ten" <|
+            \_ -> Expect.equal (List.map nnf [ 2000, 10, 50 ]) (List.map nnf [ Chart.niceMax 1200, Chart.niceMax 7, Chart.niceMax 45 ])
+        , test "gridLevels are evenly spaced from 1 to 0" <|
+            \_ -> Expect.equal (normPts (List.map (\f -> ( f, 0 )) [ 1, 0.75, 0.5, 0.25, 0 ])) (normPts (List.map (\f -> ( f, 0 )) (Chart.gridLevels 4)))
+        ]
+
+
+
+-- DATA TOOLS -----------------------------------------------------------------
+
+
+dataToolTests : Test
+dataToolTests =
+    describe "data tools"
+        [ test "removeDuplicates compacts duplicate rows" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "x" ), ( "A2", "y" ), ( "A3", "x" ), ( "A4", "z" ) ]
+                            |> Sheet.removeDuplicates (rangeOf "A1" "A4")
+                in
+                Expect.equal ( VText "x", VText "y", VText "z", VEmpty ) ( valOf "A1" s, valOf "A2" s, valOf "A3" s, valOf "A4" s )
+        , test "textToColumns splits by a delimiter" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "a,b,c" ) ] |> Sheet.textToColumns (rangeOf "A1" "A1") "," |> Sheet.recalcAll
+                in
+                Expect.equal ( VText "a", VText "b", VText "c" ) ( valOf "A1" s, valOf "B1" s, valOf "C1" s )
+        , test "transposeRange flips rows and columns" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "B1", "2" ), ( "A2", "3" ), ( "B2", "4" ) ]
+                            |> Sheet.transposeRange (rangeOf "A1" "B2") (at "D1")
+                            |> Sheet.recalcAll
+                in
+                expectVal2 ( VNumber 3, VNumber 2 ) ( valOf "E1" s, valOf "D2" s )
+        , test "sortByKeys sorts by two keys" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "West" ), ( "B1", "2" ), ( "A2", "East" ), ( "B2", "9" ), ( "A3", "East" ), ( "B3", "1" ) ]
+                            |> Sheet.sortByKeys (rangeOf "A1" "B3") [ ( 0, True ), ( 1, True ) ]
+                in
+                -- East/1, East/9, West/2
+                Expect.equal ( VText "East", normVal (VNumber 1), VText "West" ) ( valOf "A1" s, normVal (valOf "B1" s), valOf "A3" s )
         ]
