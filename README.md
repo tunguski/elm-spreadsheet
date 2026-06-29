@@ -1,7 +1,7 @@
 # elm-spreadsheet
 
 A spreadsheet **logic and view layer** in Elm (built for the [elm-lang](../../) compiler).
-It gives you a recalculating cell engine — values, ~195 formula functions, number formats,
+It gives you a recalculating cell engine — values, ~225 formula functions, number formats,
 conditional styling, structural editing (insert/delete, copy/paste, autofill), multiple
 sheets with cross-sheet references, what-if analysis (Goal Seek, data tables), live
 **dynamic arrays** that spill (`SORT`/`FILTER`/`SEQUENCE`/`HSTACK`/`LINEST`, the `A1#`
@@ -12,7 +12,7 @@ import/export, analytics (pivots, sparklines, charts, icon sets), and authoring 
 (**cell borders**, **formula-based conditional formatting**, **cell protection**,
 **autofilter**, **scenarios**, formula **autocomplete**) — plus a keyboard-driven,
 class-styled HTML grid to render it. The engine is pure and effect-free, so it is fully
-unit-tested without a browser (454 tests).
+unit-tested without a browser (489 tests).
 
 ![demo](docs/screenshot.png)
 
@@ -22,7 +22,7 @@ unit-tested without a browser (454 tests).
   errors. A hand-written formula parser with Excel/Sheets semantics: operator precedence
   (`-2^2 = 4`, right-associative `^`), `&` concatenation, `%` postfix, `$` absolute refs,
   ranges (`A1:B5`).
-- **~195 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
+- **~225 functions** across every category — math/trig (`SUM`, `ROUND`, `MOD`, `POWER`,
   `SIN`, `GCD`, …), statistics & forecasting (`AVERAGE`, `MEDIAN`, `PERCENTILE`, `RANK`,
   `CORREL`, `SLOPE`, `INTERCEPT`, `FORECAST`, `GEOMEAN`, …), multi-criteria (`SUMIFS`,
   `COUNTIFS`, `AVERAGEIFS`, `MINIFS`/`MAXIFS`), finance (`PMT`, `FV`, `PV`, `NPER`, `NPV`,
@@ -96,6 +96,19 @@ unit-tested without a browser (454 tests).
   which function and argument the caret is in) — pure string analysis, no DOM.
 - **What-if scenarios.** `Spreadsheet.Scenarios` captures named snapshots of input cells,
   `apply`s one, or lays several side by side against result cells with `summary`.
+- **Science & engineering functions.** **Matrix algebra** (`MMULT`, `MINVERSE`, `MDETERM`,
+  `MUNIT`, spilling); **financial depth** (`RATE`, `IPMT`/`PPMT`, `MIRR`, `XNPV`/`XIRR`,
+  `SLN`, `DDB`, `CUMIPMT`); **statistical distributions** (`NORM.DIST`/`NORM.INV`,
+  `BINOM.DIST`, `POISSON.DIST`, `EXPON.DIST`); and **engineering** (`DEC2BIN`/`HEX`/`OCT`
+  and inverses, `BITAND`/`BITOR`/`BITXOR`/shifts, `CONVERT` units).
+- **Multi-field pivot tables.** `Pivot.pivotTable` groups by several **nested row fields**
+  (with a subtotal per leading group), an optional **column field** (a crosstab), a value
+  column and an aggregate, plus a grand total — a renderable matrix.
+- **Charts.** Column / bar / pie / line / **area** / **scatter**, drawn with pure CSS, now
+  with axis **gridlines**; `Spreadsheet.Chart` exposes the geometry (`scatterPoints`,
+  `stackBars`, `niceMax`, `gridLevels`).
+- **Data tools.** `Sheet.sortByKeys` (multi-key sort), `removeDuplicates`, `textToColumns`
+  and `transposeRange`.
 - **Configurable application chrome.** `Spreadsheet.Chrome` renders a **menu bar**, a
   **toolbar** and modal **dialogs** modelled on web office suites (Google Sheets / Excel for
   the web). It's declarative — the host describes menus (`Item`/`Check`/`SubMenu`/`Divider`,
@@ -160,9 +173,9 @@ src/Spreadsheet/
   Suggest.elm    formula autocomplete + signature help (a function catalog)
   Scenarios.elm  what-if scenario manager (named input snapshots)
   View.elm       the class-styled HTML grid (+ View.chart)
-src/Examples.elm  a single-page gallery of 17 live, editable examples (chrome + authoring)
+src/Examples.elm  a single-page gallery of 18 live, editable examples (chrome, authoring, science)
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   454 tests
+test/SpreadsheetTest.elm   489 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -229,7 +242,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 454 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 489 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
