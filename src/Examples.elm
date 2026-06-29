@@ -36,6 +36,7 @@ import Spreadsheet.Ref as Ref exposing (Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 import Spreadsheet.Spill as Spill
 import Spreadsheet.Style as Style
+import Spreadsheet.Suggest as Suggest
 import Spreadsheet.Validation as Validation
 import Spreadsheet.Value exposing (Value(..))
 import Spreadsheet.View as View
@@ -102,6 +103,7 @@ type alias Example =
     , hasToolbar : Bool
     , openMenu : Maybe String
     , dialog : Maybe DialogKind
+    , authoring : Bool
     }
 
 
@@ -156,6 +158,7 @@ init _ =
             , exFunctional
             , exQuery
             , exChrome
+            , exAuthoring
             , exAsync
             ]
       , drag = Nothing
@@ -223,6 +226,10 @@ type Msg
     | OpenMenu Int String
     | CloseMenus Int
     | ChromeMsg Int ChromeAction
+      -- authoring & integrity panel
+    | ToggleProtect Int
+    | AuthFilter Int String
+    | ApplyScenario Int (List ( Ref, String ))
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -265,7 +272,16 @@ update msg model =
             ( mapExample id fillSel model, focusGrid id )
 
         StartEdit id ref ->
-            ( mapExample id (\e -> { e | selected = ref, editing = Just ( ref, Sheet.rawAt ref e.sheet ) }) model
+            -- A protected, locked cell can't be edited (it can still be selected).
+            ( mapExample id
+                (\e ->
+                    if Sheet.isEditable ref e.sheet then
+                        { e | selected = ref, editing = Just ( ref, Sheet.rawAt ref e.sheet ) }
+
+                    else
+                        { e | selected = ref }
+                )
+                model
             , focusEdit id
             )
 
@@ -413,6 +429,34 @@ update msg model =
         ChromeMsg id action ->
             -- Any menu/toolbar action first closes the open menu, then runs.
             applyChrome id action (mapExample id (\e -> { e | openMenu = Nothing }) model)
+
+        ToggleProtect id ->
+            ( mapExample id (\e -> { e | sheet = Sheet.protectSheet (not (Sheet.isProtected e.sheet)) e.sheet }) model, Cmd.none )
+
+        AuthFilter id value ->
+            ( mapExample id
+                (\e ->
+                    let
+                        sheet2 =
+                            Sheet.setColumnFilter e.filterCol
+                                (if value == "" then
+                                    Nothing
+
+                                 else
+                                    Just [ value ]
+                                )
+                                e.sheet
+                    in
+                    { e | sheet = sheet2, filterValue = value, hiddenRows = Sheet.filteredOutRows e.dataRange sheet2 }
+                )
+                model
+            , Cmd.none
+            )
+
+        ApplyScenario id inputs ->
+            ( mapExample id (\e -> recalcExample (List.map Tuple.first inputs) { e | sheet = Sheet.setRawMany inputs e.sheet }) model
+            , Cmd.none
+            )
 
         Frame _ ->
             ( { model | examples = List.map stepExample model.examples }, Cmd.none )
@@ -1194,6 +1238,7 @@ example id title blurb cols rows sheet =
     , hasToolbar = True
     , openMenu = Nothing
     , dialog = Nothing
+    , authoring = False
     }
 
 
@@ -1712,6 +1757,7 @@ exAsync =
     , hasToolbar = True
     , openMenu = Nothing
     , dialog = Nothing
+    , authoring = False
     }
 
 
@@ -1775,6 +1821,11 @@ exampleView selecting e =
               ]
             , if e.chrome then
                 chromeView e
+
+              else
+                []
+            , if e.authoring then
+                [ authoringPanel e ]
 
               else
                 []
@@ -2490,6 +2541,125 @@ chromeSheet =
         , ( "A5", "Eggs" ), ( "B5", "24" ), ( "C5", "0.2" ), ( "D5", "=B5*C5" )
         ]
         |> withStyle (cells "A1" "D1") (\s -> { s | bold = True })
+        |> Sheet.recalcAll
+
+
+-- AUTHORING & INTEGRITY PANEL ------------------------------------------------
+
+
+{-| A Name Box + protect toggle + column filter + scenario buttons, acting on the sheet. -}
+authoringPanel : Example -> Html Msg
+authoringPanel e =
+    div [ HA.class "fmt-toolbar" ]
+        [ span [ HA.class "fmt-cell" ] [ text (nameBoxLabel e) ]
+        , span [ HA.class "fmt-sep" ] []
+        , editBtn True
+            (ToggleProtect e.id)
+            (if Sheet.isProtected e.sheet then
+                "🔒 Protected"
+
+             else
+                "🔓 Unprotected"
+            )
+        , span [ HA.class "fmt-sep" ] []
+        , span [ HA.class "wb-label" ] [ text ("Filter " ++ columnTitle e.filterCol e) ]
+        , select [ HA.class "fsel", HE.onInput (AuthFilter e.id) ]
+            (option [ HA.value "" ] [ text "(all)" ]
+                :: List.map
+                    (\v -> option [ HA.value v, HA.selected (v == e.filterValue) ] [ text v ])
+                    (Sheet.distinctValues e.filterCol e.dataRange e.sheet)
+            )
+        , span [ HA.class "fmt-sep" ] []
+        , span [ HA.class "wb-label" ] [ text "Discount scenario:" ]
+        , editBtn True (ApplyScenario e.id [ ( ref "G1", "0.05" ) ]) "Low (5%)"
+        , editBtn True (ApplyScenario e.id [ ( ref "G1", "0.25" ) ]) "High (25%)"
+        , span [ HA.class "fmt-sep" ] []
+        , span [ HA.class "wb-label ss-suggest" ] [ text (suggestHint e) ]
+        ]
+
+
+{-| A live formula hint from `Spreadsheet.Suggest`: the active function's signature while
+typing a call, else the top autocomplete match for the identifier being typed. -}
+suggestHint : Example -> String
+suggestHint e =
+    case e.editing of
+        Just ( _, buffer ) ->
+            case Suggest.activeCall buffer of
+                Just call ->
+                    case Suggest.lookup call.name of
+                        Just doc ->
+                            "ƒ " ++ doc.signature
+
+                        Nothing ->
+                            ""
+
+                Nothing ->
+                    case Suggest.matching (Suggest.currentToken buffer) of
+                        doc :: _ ->
+                            "↳ " ++ doc.name ++ " — " ++ doc.summary
+
+                        [] ->
+                            ""
+
+        Nothing ->
+            "Tip: double-click a cell and type =SU for autocomplete"
+
+
+{-| The Name Box label: the defined name for the current selection, else its A1 address. -}
+nameBoxLabel : Example -> String
+nameBoxLabel e =
+    case Sheet.nameForRange (selectionOf e) e.sheet of
+        Just nm ->
+            nm
+
+        Nothing ->
+            Ref.toA1 e.selected
+
+
+{-| 17 — authoring & integrity: borders, formula-based conditional formatting, cell
+protection, an autofilter, a Name Box and a scenario manager. -}
+exAuthoring : Example
+exAuthoring =
+    let
+        e =
+            example 17
+                "Authoring & integrity: borders, protection, filter, scenarios"
+                "A budget grid with a blue outline and a thin inner grid (cell borders). Rows where Spent exceeds Budget are tinted by a FORMULA-based conditional format (=$C2>$B2, evaluated per row). The header row is locked: press 🔓→🔒 to protect the sheet and try to edit a header (blocked) versus a data cell (allowed). The Name Box (top-left) shows the selection's address, or “Budgets” over the named range B2:B5. The filter dropdown hides regions; the Discount scenario buttons set G1 and recompute the discounted total in G4."
+                8
+                7
+                authoringSheet
+    in
+    { e | authoring = True, selected = ref "B2", anchor = ref "B2", dataRange = rangeOf "A2" "D5", filterCol = 0 }
+
+
+authoringSheet : Sheet
+authoringSheet =
+    let
+        thin =
+            { style = Style.Thin, color = "#cfd6e4" }
+
+        outline =
+            { style = Style.Medium, color = "#1a73e8" }
+
+        overspend =
+            Style.withBackground "#fce8e6" (Style.withColor "#c5221f" Style.emptyStyle)
+    in
+    build 12 8
+        [ ( "A1", "Region" ), ( "B1", "Budget" ), ( "C1", "Spent" ), ( "D1", "Status" )
+        , ( "A2", "West" ), ( "B2", "1000" ), ( "C2", "1200" ), ( "D2", "=IF(C2>B2,\"Over\",\"OK\")" )
+        , ( "A3", "East" ), ( "B3", "800" ), ( "C3", "600" ), ( "D3", "=IF(C3>B3,\"Over\",\"OK\")" )
+        , ( "A4", "West" ), ( "B4", "1500" ), ( "C4", "1500" ), ( "D4", "=IF(C4>B4,\"Over\",\"OK\")" )
+        , ( "A5", "North" ), ( "B5", "500" ), ( "C5", "900" ), ( "D5", "=IF(C5>B5,\"Over\",\"OK\")" )
+        , ( "F1", "Discount" ), ( "G1", "0.1" )
+        , ( "F3", "Total spent" ), ( "G3", "=SUM(C2:C5)" )
+        , ( "F4", "After discount" ), ( "G4", "=G3*(1-G1)" )
+        ]
+        |> withStyle (cells "A1" "D1") (\s -> { s | bold = True })
+        |> Sheet.allBorders (rangeOf "A1" "D5") thin
+        |> Sheet.outlineBorders (rangeOf "A1" "D5") outline
+        |> Sheet.addFormulaRule (rangeOf "A2" "D5") "=$C2>$B2" overspend
+        |> Sheet.setLocked (rangeOf "A1" "D1") True
+        |> Sheet.defineName "Budgets" (rangeOf "B2" "B5")
         |> Sheet.recalcAll
 
 
