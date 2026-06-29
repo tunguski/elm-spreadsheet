@@ -190,31 +190,26 @@ valOf a1 s =
     Sheet.valueAt (at a1) s
 
 
-{-| Compare two values, normalising numbers first.
+{-| Compare two values.
 
-This backend distinguishes a whole-number `Float` *literal* (e.g. `VNumber 5` written in
-source) from the same value produced by computation (`String.toFloat "5"`), so naive
-`Expect.equal` reports spurious "expected 5 but got 5" failures. Round-tripping every
-number through `String.fromFloat`/`toFloat` puts both sides in the computed
-representation, so equality is meaningful. -}
+These used to round-trip every number through `String.fromFloat`/`toFloat` to work around a
+backend quirk where a whole-number `Float` *literal* (`VNumber 5` in source) did not `==` the
+same value produced by computation. That is now fixed in the compiler (structural `==` coerces
+numbers, including ones nested in tuples/ctors/lists/records), so these are plain pass-throughs
+kept only so the call sites read in terms of values. -}
 expectVal : Value -> Value -> Expect.Expectation
-expectVal expected actual =
-    Expect.equal (normVal expected) (normVal actual)
+expectVal =
+    Expect.equal
 
 
 expectVal2 : ( Value, Value ) -> ( Value, Value ) -> Expect.Expectation
-expectVal2 ( a, b ) ( c, d ) =
-    Expect.equal ( normVal a, normVal b ) ( normVal c, normVal d )
+expectVal2 =
+    Expect.equal
 
 
 normVal : Value -> Value
 normVal v =
-    case v of
-        VNumber n ->
-            VNumber (Maybe.withDefault n (String.toFloat (String.fromFloat n)))
-
-        _ ->
-            v
+    v
 
 
 {-| Wrap a `toNumber`-style result as a value for normalised comparison. -}
@@ -2023,15 +2018,12 @@ chartTests =
         ]
 
 
-{-| Normalise a list of float pairs through a string round-trip (so a literal `1` and a
-computed `1.0` compare equal in this backend). -}
+{-| Pass-through, kept so call sites read in terms of points. The string round-trip it once did
+(to make a literal `1` and a computed `1.0` compare equal) is no longer needed now that the
+compiler coerces numbers under structural `==`. -}
 normPts : List ( Float, Float ) -> List ( Float, Float )
 normPts pts =
-    let
-        nf x =
-            Maybe.withDefault x (String.toFloat (String.fromFloat x))
-    in
-    List.map (\( a, b ) -> ( nf a, nf b )) pts
+    pts
 
 
 {-| The workspace document adapter: its JSON codec must round-trip the raw cells (and the sheet
@@ -3131,7 +3123,7 @@ near expected actual =
 
 nnf : Float -> Float
 nnf x =
-    Maybe.withDefault x (String.toFloat (String.fromFloat x))
+    x
 
 
 
