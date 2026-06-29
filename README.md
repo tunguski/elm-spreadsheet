@@ -84,6 +84,12 @@ so it is fully unit-tested without a browser (431 tests).
   restyle everything — the demo includes a Solarized-beige theme); only data-driven values
   (colour, font, size, bar widths) are emitted inline. A `with*/toggle*/…Of` API on
   `Style` backs a Word-style formatting toolbar in the demo.
+- **Configurable application chrome.** `Spreadsheet.Chrome` renders a **menu bar**, a
+  **toolbar** and modal **dialogs** modelled on web office suites (Google Sheets / Excel for
+  the web). It's declarative — the host describes menus (`Item`/`Check`/`SubMenu`/`Divider`,
+  with shortcut hints and enabled/checked states) and a toolbar (`Tool`/`Toggle`/`Pick`/`Gap`)
+  as plain data carrying its own messages — and fully optional: show a menu bar, a toolbar,
+  both or neither, with whatever content you pass. Styled with CSS classes, no inline styles.
 - **Keyboard-driven grid with range selection.** The `View` grid is focusable and navigates
   like Excel/Sheets: arrow keys move the selection, a printable key starts editing the cell,
   **Enter** commits and moves down (**Shift+Enter** up), **Tab** commits and moves right
@@ -138,8 +144,9 @@ src/Spreadsheet/
   Json.elm       JSON array-of-objects import/export
   Analysis.elm   what-if analysis (Goal Seek, data tables)
   Chart.elm      chart geometry (column/bar/pie/line)
+  Chrome.elm     configurable menu bar + toolbar + dialogs (web-office-suite style)
   View.elm       the class-styled HTML grid (+ View.chart)
-src/Main.elm     a single-page gallery of ~12 live, editable examples
+src/Examples.elm  a single-page gallery of 16 live, editable examples (incl. a full chrome)
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
 test/SpreadsheetTest.elm   431 tests
 ```
