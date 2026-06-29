@@ -104,6 +104,7 @@ type alias Example =
     , openMenu : Maybe String
     , dialog : Maybe DialogKind
     , authoring : Bool
+    , science : Bool
     }
 
 
@@ -159,6 +160,7 @@ init _ =
             , exQuery
             , exChrome
             , exAuthoring
+            , exScience
             , exAsync
             ]
       , drag = Nothing
@@ -1239,6 +1241,7 @@ example id title blurb cols rows sheet =
     , openMenu = Nothing
     , dialog = Nothing
     , authoring = False
+    , science = False
     }
 
 
@@ -1758,6 +1761,7 @@ exAsync =
     , openMenu = Nothing
     , dialog = Nothing
     , authoring = False
+    , science = False
     }
 
 
@@ -1865,6 +1869,11 @@ exampleView selecting e =
                 []
             , if e.frozenRows > 0 then
                 [ pivotPanel e, chartsPanel e ]
+
+              else
+                []
+            , if e.science then
+                [ sciencePanel e ]
 
               else
                 []
@@ -2660,6 +2669,110 @@ authoringSheet =
         |> Sheet.addFormulaRule (rangeOf "A2" "D5") "=$C2>$B2" overspend
         |> Sheet.setLocked (rangeOf "A1" "D1") True
         |> Sheet.defineName "Budgets" (rangeOf "B2" "B5")
+        |> Sheet.recalcAll
+
+
+-- ANALYSIS & SCIENCE PANEL ---------------------------------------------------
+
+
+{-| A rendered multi-field pivot table plus an area and a scatter chart (with gridlines). -}
+sciencePanel : Example -> Html Msg
+sciencePanel e =
+    let
+        table =
+            Pivot.pivotTable
+                { rowFields = [ 0, 1 ], colField = Nothing, valueCol = 2, agg = Pivot.Sum }
+                (rangeOf "A1" "C6")
+                e.sheet
+
+        sales =
+            List.map (\r -> cellNumber { col = 2, row = r } e) (List.range 1 5)
+    in
+    div [ HA.class "ss-charts" ]
+        [ pivotTableView table
+        , View.chart { kind = Chart.Area, title = "Sales (area + gridlines)", labels = [], values = sales, colors = chartPalette }
+        , View.chart { kind = Chart.Scatter, title = "Sales (scatter)", labels = [], values = sales, colors = chartPalette }
+        ]
+
+
+{-| Render a pivot-table matrix (header row first) as a small HTML table. -}
+pivotTableView : List (List Value) -> Html Msg
+pivotTableView rows =
+    Html.table [ HA.class "ss-pivottable" ]
+        (List.indexedMap
+            (\i row ->
+                Html.tr []
+                    (List.map
+                        (\v ->
+                            if i == 0 then
+                                Html.th [] [ text (valText v) ]
+
+                            else
+                                Html.td [] [ text (valText v) ]
+                        )
+                        row
+                    )
+            )
+            rows
+        )
+
+
+valText : Value -> String
+valText v =
+    case v of
+        VText s ->
+            s
+
+        VNumber n ->
+            String.fromFloat n
+
+        VBool b ->
+            if b then
+                "TRUE"
+
+            else
+                "FALSE"
+
+        VEmpty ->
+            ""
+
+        VError _ ->
+            "#ERR"
+
+
+{-| 18 — analysis & science: matrix/financial/statistical/engineering functions in cells,
+a multi-field pivot table and richer charts. -}
+exScience : Example
+exScience =
+    let
+        e =
+            example 18
+                "Analysis & science: matrix, stats, finance, pivot & charts"
+                "The cells on the right use the new function packs — =MDETERM over a 2×2 range, the standard-normal CDF =NORM.S.DIST(1.96,TRUE), a unit conversion =CONVERT(100,\"C\",\"F\"), a base conversion =DEC2HEX(255) and straight-line depreciation =SLN(10000,1000,5). Below, the sales table is summarised by a multi-field pivot (Region › Product, with subtotals and a grand total) and drawn as an area chart with axis gridlines and a scatter plot."
+                8
+                7
+                scienceSheet
+    in
+    { e | science = True, selected = ref "A2", anchor = ref "A2" }
+
+
+scienceSheet : Sheet
+scienceSheet =
+    build 14 8
+        [ ( "A1", "Region" ), ( "B1", "Product" ), ( "C1", "Sales" )
+        , ( "A2", "East" ), ( "B2", "Apple" ), ( "C2", "30" )
+        , ( "A3", "East" ), ( "B3", "Pear" ), ( "C3", "20" )
+        , ( "A4", "West" ), ( "B4", "Apple" ), ( "C4", "50" )
+        , ( "A5", "West" ), ( "B5", "Pear" ), ( "C5", "40" )
+        , ( "A6", "West" ), ( "B6", "Apple" ), ( "C6", "10" )
+        , ( "E2", "2" ), ( "F2", "1" ), ( "E3", "1" ), ( "F3", "3" )
+        , ( "E5", "Determinant" ), ( "G5", "=MDETERM(E2:F3)" )
+        , ( "E6", "Φ(1.96)" ), ( "G6", "=NORM.S.DIST(1.96,TRUE)" )
+        , ( "E7", "100°C in °F" ), ( "G7", "=CONVERT(100,\"C\",\"F\")" )
+        , ( "E8", "255 in hex" ), ( "G8", "=DEC2HEX(255)" )
+        , ( "E9", "SLN dep." ), ( "G9", "=SLN(10000,1000,5)" )
+        ]
+        |> withStyle (cells "A1" "C1") (\s -> { s | bold = True })
         |> Sheet.recalcAll
 
 
