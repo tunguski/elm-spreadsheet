@@ -935,3 +935,310 @@ th.ss-frozen-col {
 }
 .sheetdoc .ss-grid-focus { max-height: 70vh; overflow: auto; border: 1px solid var(--ws-border); border-radius: 8px; }
 .sheetdoc .ss-grid-focus:focus { outline: 2px solid var(--ws-accent); outline-offset: -2px; }
+
+/* ============================================================================
+   APPLICATION CHROME — menu bar, toolbar, dialogs (Spreadsheet.Chrome)
+   ========================================================================== */
+
+/* --- Menu bar ------------------------------------------------------------- */
+.ss-menubar {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    gap: 1px;
+    padding: 0 6px;
+    background: #fff;
+    border: 1px solid var(--ss-border);
+    border-radius: 8px 8px 0 0;
+    font-family: var(--ss-font);
+    font-size: 13px;
+    user-select: none;
+}
+
+.ss-menu {
+    position: relative;
+}
+
+.ss-menu-label {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    padding: 7px 10px;
+    font: inherit;
+    color: #3c4043;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.ss-menu-label:hover {
+    background: #f1f3f4;
+}
+
+.ss-menu-label-open {
+    background: var(--ss-selected-bg);
+    color: var(--ss-accent);
+}
+
+/* The click-away layer under an open menu. */
+.ss-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+}
+
+.ss-menu-panel,
+.ss-menu-subpanel {
+    position: absolute;
+    z-index: 50;
+    min-width: 220px;
+    padding: 6px 0;
+    background: #fff;
+    border: 1px solid var(--ss-border);
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+
+.ss-menu-panel {
+    top: calc(100% + 2px);
+    left: 0;
+}
+
+.ss-menu-item {
+    appearance: none;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 14px;
+    font: inherit;
+    font-size: 13px;
+    color: #3c4043;
+    text-align: left;
+    cursor: pointer;
+}
+
+.ss-menu-item:hover {
+    background: #f1f3f4;
+}
+
+.ss-menu-item:disabled {
+    color: #bdc1c6;
+    cursor: default;
+    background: transparent;
+}
+
+.ss-menu-item-label {
+    flex: 1;
+}
+
+.ss-menu-item-shortcut {
+    color: #80868b;
+    font-size: 12px;
+}
+
+.ss-menu-check {
+    width: 14px;
+    color: var(--ss-accent);
+    text-align: center;
+}
+
+.ss-menu-divider {
+    height: 1px;
+    margin: 6px 0;
+    background: var(--ss-border);
+}
+
+/* Sub-menus reveal their panel on hover. */
+.ss-menu-sub {
+    position: relative;
+}
+
+.ss-menu-subpanel {
+    top: -6px;
+    left: 100%;
+    display: none;
+}
+
+.ss-menu-sub:hover > .ss-menu-subpanel {
+    display: block;
+}
+
+/* --- Toolbar -------------------------------------------------------------- */
+.ss-toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 5px 8px;
+    background: #f8f9fa;
+    border: 1px solid var(--ss-border);
+    border-top: 0;
+    font-family: var(--ss-font);
+}
+
+.ss-tool {
+    appearance: none;
+    min-width: 28px;
+    height: 28px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    font-size: 14px;
+    color: #3c4043;
+    cursor: pointer;
+}
+
+.ss-tool:hover {
+    background: #e8eaed;
+}
+
+.ss-tool:disabled {
+    color: #bdc1c6;
+    cursor: default;
+    background: transparent;
+}
+
+.ss-tool-on {
+    background: var(--ss-selected-bg);
+    color: var(--ss-accent);
+}
+
+.ss-tool-pick {
+    height: 28px;
+    border: 1px solid var(--ss-border);
+    border-radius: 6px;
+    background: #fff;
+    font-family: var(--ss-font);
+    font-size: 13px;
+    color: #3c4043;
+    padding: 0 4px;
+}
+
+.ss-tool-gap {
+    width: 1px;
+    height: 20px;
+    margin: 0 5px;
+    background: var(--ss-border);
+}
+
+/* --- Dialogs -------------------------------------------------------------- */
+.ss-dialog-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(32, 33, 36, 0.5);
+}
+
+.ss-dialog {
+    width: min(460px, 92vw);
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+    font-family: var(--ss-font);
+    overflow: hidden;
+}
+
+.ss-dialog-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--ss-border);
+}
+
+.ss-dialog-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: #202124;
+}
+
+.ss-dialog-x {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    font-size: 15px;
+    color: #5f6368;
+    cursor: pointer;
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+}
+
+.ss-dialog-x:hover {
+    background: #f1f3f4;
+}
+
+.ss-dialog-body {
+    padding: 18px;
+    font-size: 13px;
+    color: #3c4043;
+    line-height: 1.5;
+    max-height: 60vh;
+    overflow: auto;
+}
+
+.ss-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 18px;
+    border-top: 1px solid var(--ss-border);
+}
+
+/* Buttons & chips reused inside dialog bodies/footers. */
+.ss-dlg-btn {
+    appearance: none;
+    border: 1px solid var(--ss-border);
+    background: #fff;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font: inherit;
+    font-size: 13px;
+    color: #3c4043;
+    cursor: pointer;
+}
+
+.ss-dlg-btn:hover {
+    background: #f1f3f4;
+}
+
+.ss-dlg-btn-primary {
+    background: var(--ss-accent);
+    border-color: var(--ss-accent);
+    color: #fff;
+}
+
+.ss-dlg-btn-primary:hover {
+    filter: brightness(1.05);
+}
+
+.ss-dlg-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* The little on/off config strip above the demo. */
+.ss-ui-config {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 6px 2px;
+    font-family: var(--ss-font);
+    font-size: 13px;
+    color: #5f6368;
+}
+
+.ss-ui-config label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
