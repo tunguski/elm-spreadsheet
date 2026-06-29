@@ -20,6 +20,21 @@ module Spreadsheet.Sheet exposing
     , addDataBar
     , addIconSet
     , iconAt
+    , addFormulaRule
+    , allBorders
+    , outlineBorders
+    , clearBorders
+    , borderAt
+    , setLocked
+    , isLocked
+    , protectSheet
+    , isProtected
+    , isEditable
+    , setColumnFilter
+    , columnFilter
+    , filteredOutRows
+    , distinctValues
+    , nameForRange
     , recalcAll
     , recalcAllWith
     , recalcFrom
@@ -165,7 +180,18 @@ type alias Model =
     , spillAnchors : Dict ( Int, Int ) Range
     , lambdas : Dict String Eval.Lambda
     , tables : Dict String TableDef
+    , borders : Dict ( Int, Int ) Style.Borders
+    , formulaRules : List FormulaRule
+    , locked : Dict ( Int, Int ) Bool
+    , protected : Bool
+    , colFilters : Dict Int (List String)
     }
+
+
+{-| A formula-based conditional-format rule: when the formula `expr` (evaluated with the
+cell as its relative anchor) is truthy, layer `style` on a cell in `range`. -}
+type alias FormulaRule =
+    { range : Range, expr : Expr, style : CellStyle }
 
 
 {-| A structured table: the whole range (header row first) and whether the last row is a
@@ -216,6 +242,11 @@ empty rows cols =
         , spillAnchors = Dict.empty
         , lambdas = Dict.empty
         , tables = Dict.empty
+        , borders = Dict.empty
+        , formulaRules = []
+        , locked = Dict.empty
+        , protected = False
+        , colFilters = Dict.empty
         }
 
 
@@ -445,6 +476,229 @@ iconAt ref ((Sheet m) as sheet) =
 
         _ ->
             Nothing
+
+
+
+-- BORDERS --------------------------------------------------------------------
+
+
+{-| Put `border` on every edge of every cell in a range (a full grid). -}
+allBorders : Range -> Style.Border -> Sheet -> Sheet
+allBorders range border sheet =
+    let
+        all =
+            { top = Just border, right = Just border, bottom = Just border, left = Just border }
+    in
+    List.foldl (\r -> mergeBordersAt r all) sheet (Ref.cellsOf range)
+
+
+{-| Draw `border` around the outside perimeter of a range only. -}
+outlineBorders : Range -> Style.Border -> Sheet -> Sheet
+outlineBorders range border sheet =
+    let
+        n =
+            Ref.normalize range
+    in
+    List.foldl
+        (\r ->
+            mergeBordersAt r
+                { top = onlyIf (r.row == n.start.row) border
+                , bottom = onlyIf (r.row == n.end.row) border
+                , left = onlyIf (r.col == n.start.col) border
+                , right = onlyIf (r.col == n.end.col) border
+                }
+        )
+        sheet
+        (Ref.cellsOf n)
+
+
+onlyIf : Bool -> a -> Maybe a
+onlyIf cond x =
+    if cond then
+        Just x
+
+    else
+        Nothing
+
+
+{-| Remove all borders from a range. -}
+clearBorders : Range -> Sheet -> Sheet
+clearBorders range (Sheet m) =
+    Sheet { m | borders = List.foldl (\r d -> Dict.remove (key r) d) m.borders (Ref.cellsOf range) }
+
+
+mergeBordersAt : Ref -> Style.Borders -> Sheet -> Sheet
+mergeBordersAt ref new ((Sheet m) as sheet) =
+    let
+        old =
+            borderAt ref sheet
+
+        merged =
+            { top = orElseB new.top old.top
+            , right = orElseB new.right old.right
+            , bottom = orElseB new.bottom old.bottom
+            , left = orElseB new.left old.left
+            }
+    in
+    Sheet { m | borders = Dict.insert (key ref) merged m.borders }
+
+
+orElseB : Maybe a -> Maybe a -> Maybe a
+orElseB new old =
+    case new of
+        Just _ ->
+            new
+
+        Nothing ->
+            old
+
+
+{-| The borders set on a cell (`Style.noBorders` if none). -}
+borderAt : Ref -> Sheet -> Style.Borders
+borderAt ref (Sheet m) =
+    Maybe.withDefault Style.noBorders (Dict.get (key ref) m.borders)
+
+
+
+-- FORMULA-BASED CONDITIONAL FORMATTING ---------------------------------------
+
+
+{-| Add a formula-based conditional-format rule: the formula is evaluated for each cell of
+`range` with that cell as its relative anchor (so `=$A1>$B1` shifts down the range), and
+where it is truthy the `style` is layered on. A malformed formula is ignored. -}
+addFormulaRule : Range -> String -> CellStyle -> Sheet -> Sheet
+addFormulaRule range src style (Sheet m) =
+    case Parser.parseFormula src of
+        Ok expr ->
+            Sheet { m | formulaRules = m.formulaRules ++ [ { range = Ref.normalize range, expr = expr, style = style } ] }
+
+        Err _ ->
+            Sheet m
+
+
+{-| Does a formula rule fire for this cell? Translate its formula by the cell's offset
+within the rule range, evaluate it, and test for truth. -}
+formulaRuleApplies : Ref -> FormulaRule -> Sheet -> Bool
+formulaRuleApplies ref rule sheet =
+    if not (Ref.contains rule.range ref) then
+        False
+
+    else
+        let
+            n =
+                Ref.normalize rule.range
+
+            shifted =
+                Refactor.translate (ref.col - n.start.col) (ref.row - n.start.row) rule.expr
+        in
+        case Value.toBool (Eval.eval (ctxFor noExternal sheet ref) shifted) of
+            Ok b ->
+                b
+
+            Err _ ->
+                False
+
+
+
+-- CELL PROTECTION ------------------------------------------------------------
+
+
+{-| Mark a range of cells locked or unlocked. Locking only bites once the sheet is
+protected (`protectSheet`). -}
+setLocked : Range -> Bool -> Sheet -> Sheet
+setLocked range locked (Sheet m) =
+    Sheet { m | locked = List.foldl (\r d -> Dict.insert (key r) locked d) m.locked (Ref.cellsOf range) }
+
+
+{-| Is a cell marked locked? -}
+isLocked : Ref -> Sheet -> Bool
+isLocked ref (Sheet m) =
+    Maybe.withDefault False (Dict.get (key ref) m.locked)
+
+
+{-| Turn sheet protection on or off. -}
+protectSheet : Bool -> Sheet -> Sheet
+protectSheet on (Sheet m) =
+    Sheet { m | protected = on }
+
+
+{-| Is the sheet protected? -}
+isProtected : Sheet -> Bool
+isProtected (Sheet m) =
+    m.protected
+
+
+{-| May a cell be edited? (No, only when the sheet is protected AND the cell is locked.) -}
+isEditable : Ref -> Sheet -> Bool
+isEditable ref sheet =
+    not (isProtected sheet && isLocked ref sheet)
+
+
+
+-- AUTOFILTER -----------------------------------------------------------------
+
+
+{-| Set (or with `Nothing`, clear) the allowed display values for a column's filter. -}
+setColumnFilter : Int -> Maybe (List String) -> Sheet -> Sheet
+setColumnFilter col allowed (Sheet m) =
+    case allowed of
+        Just vals ->
+            Sheet { m | colFilters = Dict.insert col vals m.colFilters }
+
+        Nothing ->
+            Sheet { m | colFilters = Dict.remove col m.colFilters }
+
+
+{-| The allowed values of a column's filter, if one is active. -}
+columnFilter : Int -> Sheet -> Maybe (List String)
+columnFilter col (Sheet m) =
+    Dict.get col m.colFilters
+
+
+{-| The rows of a range that the active column filters hide — a row is hidden when any
+active filter excludes that row's display value in its column. -}
+filteredOutRows : Range -> Sheet -> List Int
+filteredOutRows range ((Sheet m) as sheet) =
+    let
+        n =
+            Ref.normalize range
+    in
+    List.filter
+        (\r ->
+            Dict.foldl
+                (\col vals acc -> acc || not (List.member (displayString { col = col, row = r } sheet) vals))
+                False
+                m.colFilters
+        )
+        (List.range n.start.row n.end.row)
+
+
+{-| The distinct display values in a column over a range (for a filter dropdown), sorted. -}
+distinctValues : Int -> Range -> Sheet -> List String
+distinctValues col range sheet =
+    let
+        n =
+            Ref.normalize range
+    in
+    List.range n.start.row n.end.row
+        |> List.map (\r -> displayString { col = col, row = r } sheet)
+        |> List.filter (\s -> s /= "")
+        |> dedupStrings []
+        |> List.sort
+
+
+dedupStrings : List String -> List String -> List String
+dedupStrings seen xs =
+    case xs of
+        [] ->
+            List.reverse seen
+
+        x :: rest ->
+            if List.member x seen then
+                dedupStrings seen rest
+
+            else
+                dedupStrings (x :: seen) rest
 
 
 
@@ -1052,6 +1306,7 @@ adjustRanges f m =
         , dataBars = List.filterMap (\db -> Maybe.map (\rng -> { db | range = rng }) (f db.range)) m.dataBars
         , rankRules = List.filterMap (\rr -> Maybe.map (\rng -> { rr | range = rng }) (f rr.range)) m.rankRules
         , iconSets = List.filterMap (\is -> Maybe.map (\rng -> { is | range = rng }) (f is.range)) m.iconSets
+        , formulaRules = List.filterMap (\fr -> Maybe.map (\rng -> { fr | range = rng }) (f fr.range)) m.formulaRules
         , merges = List.filterMap f m.merges
         , validations = List.filterMap (\vd -> Maybe.map (\rng -> { vd | range = rng }) (f vd.range)) m.validations
         , names =
@@ -1417,6 +1672,20 @@ definedNames (Sheet m) =
     Dict.toList m.names
 
 
+{-| The name (if any) defined for exactly this range — for a Name Box that shows a
+selection's name. -}
+nameForRange : Range -> Sheet -> Maybe String
+nameForRange range (Sheet m) =
+    let
+        n =
+            Ref.normalize range
+    in
+    Dict.toList m.names
+        |> List.filter (\( _, r ) -> Ref.normalize r == n)
+        |> List.head
+        |> Maybe.map Tuple.first
+
+
 {-| Define a reusable **custom function** from a `LAMBDA(...)` source string. Once defined,
 call it like any built-in: `defineLambda "DISCOUNT" "=LAMBDA(p, p*0.9)"` then `=DISCOUNT(B2)`.
 A malformed lambda is ignored. Names are case-insensitive. -}
@@ -1666,10 +1935,16 @@ effectiveStyle ref ((Sheet m) as sheet) =
 
         ranked =
             List.filter (\rr -> rankApplies ref rr sheet) m.rankRules
+
+        formulaApplicable =
+            List.filter (\fr -> formulaRuleApplies ref fr sheet) m.formulaRules
+
+        withValueAndRank =
+            List.foldl (\rule acc -> Style.mergeStyle acc rule.style)
+                (List.foldl (\rule acc -> Style.mergeStyle acc rule.style) (baseStyleAt ref sheet) applicable)
+                ranked
     in
-    List.foldl (\rule acc -> Style.mergeStyle acc rule.style)
-        (List.foldl (\rule acc -> Style.mergeStyle acc rule.style) (baseStyleAt ref sheet) applicable)
-        ranked
+    List.foldl (\rule acc -> Style.mergeStyle acc rule.style) withValueAndRank formulaApplicable
 
 
 {-| Does a cell qualify under a range-aware rank rule? Examines the whole range's values. -}
@@ -1782,7 +2057,7 @@ renderedStyle ref sheet =
         base =
             Style.render (effectiveStyle ref sheet) (valueAt ref sheet)
     in
-    { base | inline = base.inline ++ conditionalInline ref sheet ++ formatColorInline ref sheet }
+    { base | inline = base.inline ++ conditionalInline ref sheet ++ formatColorInline ref sheet ++ Style.borderInline (borderAt ref sheet) }
 
 
 {-| A colour an in-cell number format asks for (e.g. `[Red]` for negatives), emitted inline. -}

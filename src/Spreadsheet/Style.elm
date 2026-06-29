@@ -17,6 +17,12 @@ module Spreadsheet.Style exposing
     , IconSet
     , iconLevel
     , iconView
+    , BorderStyle(..)
+    , Border
+    , Borders
+    , noBorders
+    , borderInline
+    , edgeCss
     , lerpColor
     , dataBarPercent
     , toggleBold
@@ -504,6 +510,77 @@ iconView style level =
 
         ThreeSymbols ->
             pick [ ( "✕", "#d93025" ), ( "!", "#e8710a" ), ( "✓", "#188038" ) ]
+
+
+-- BORDERS --------------------------------------------------------------------
+
+
+{-| A border's line style (mapped to CSS width + style by `edgeCss`). -}
+type BorderStyle
+    = Thin
+    | Medium
+    | Thick
+    | Dashed
+    | Dotted
+    | Double
+
+
+{-| A single border edge: its line style and colour. -}
+type alias Border =
+    { style : BorderStyle, color : String }
+
+
+{-| The four edges of a cell's border box; `Nothing` means "no border on that edge". -}
+type alias Borders =
+    { top : Maybe Border
+    , right : Maybe Border
+    , bottom : Maybe Border
+    , left : Maybe Border
+    }
+
+
+{-| A cell with no borders. -}
+noBorders : Borders
+noBorders =
+    { top = Nothing, right = Nothing, bottom = Nothing, left = Nothing }
+
+
+{-| The CSS shorthand for one edge, e.g. `"1px solid #1a73e8"`. -}
+edgeCss : Border -> String
+edgeCss b =
+    let
+        ( width, lineStyle ) =
+            case b.style of
+                Thin ->
+                    ( "1px", "solid" )
+
+                Medium ->
+                    ( "2px", "solid" )
+
+                Thick ->
+                    ( "3px", "solid" )
+
+                Dashed ->
+                    ( "1px", "dashed" )
+
+                Dotted ->
+                    ( "1px", "dotted" )
+
+                Double ->
+                    ( "3px", "double" )
+    in
+    width ++ " " ++ lineStyle ++ " " ++ b.color
+
+
+{-| Inline `(property, value)` declarations for a cell's set border edges. -}
+borderInline : Borders -> List ( String, String )
+borderInline bs =
+    List.filterMap identity
+        [ Maybe.map (\b -> ( "border-top", edgeCss b )) bs.top
+        , Maybe.map (\b -> ( "border-right", edgeCss b )) bs.right
+        , Maybe.map (\b -> ( "border-bottom", edgeCss b )) bs.bottom
+        , Maybe.map (\b -> ( "border-left", edgeCss b )) bs.left
+        ]
 
 
 {-| Linear interpolation between two `#rrggbb` colours; `t` is clamped to `[0,1]`. -}

@@ -23,4 +23,4 @@ $ELM test "$P/test/SpreadsheetTest.elm" \
   "$P/src/Spreadsheet/Export.elm" "$P/src/Spreadsheet/Find.elm" "$P/src/Spreadsheet/Workbook.elm" \
   "$P/src/Spreadsheet/Pivot.elm" "$P/src/Spreadsheet/Spill.elm" "$P/src/Spreadsheet/Analysis.elm" \
   "$P/src/Spreadsheet/Chart.elm" "$P/src/Spreadsheet/Regex.elm" "$P/src/Spreadsheet/Json.elm" \
-  "$P/src/Spreadsheet/Chrome.elm"
+  "$P/src/Spreadsheet/Chrome.elm" "$P/src/Spreadsheet/Suggest.elm" "$P/src/Spreadsheet/Scenarios.elm"
