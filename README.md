@@ -8,9 +8,11 @@ sheets with cross-sheet references, what-if analysis (Goal Seek, data tables), l
 spill operator, `LET`), **functional formulas** (`LAMBDA` + `MAP`/`REDUCE`/`BYROW`, custom
 named functions, array broadcasting), **structured table references** (`Sales[Amount]`),
 **querying** (`GROUPBY`/`PIVOTBY`, database functions, `REGEX*`, `AGGREGATE`), JSON
-import/export, and analytics (pivots, sparklines, charts, icon sets) — plus a
-keyboard-driven, class-styled HTML grid to render it. The engine is pure and effect-free,
-so it is fully unit-tested without a browser (431 tests).
+import/export, analytics (pivots, sparklines, charts, icon sets), and authoring features
+(**cell borders**, **formula-based conditional formatting**, **cell protection**,
+**autofilter**, **scenarios**, formula **autocomplete**) — plus a keyboard-driven,
+class-styled HTML grid to render it. The engine is pure and effect-free, so it is fully
+unit-tested without a browser (454 tests).
 
 ![demo](docs/screenshot.png)
 
@@ -84,6 +86,16 @@ so it is fully unit-tested without a browser (431 tests).
   restyle everything — the demo includes a Solarized-beige theme); only data-driven values
   (colour, font, size, bar widths) are emitted inline. A `with*/toggle*/…Of` API on
   `Style` backs a Word-style formatting toolbar in the demo.
+- **Authoring & integrity.** **Cell borders** (per-edge style + colour; `allBorders`/
+  `outlineBorders`); **formula-based conditional formatting** (`addFormulaRule range "=$C2>$B2"
+  style` — evaluated per cell with relative-ref shifting); **cell protection** (`setLocked` +
+  `protectSheet`; a locked cell on a protected sheet can't be edited); an **autofilter**
+  (`setColumnFilter`/`filteredOutRows`/`distinctValues`); and a **Name Box** (`nameForRange`).
+- **Formula authoring help.** `Spreadsheet.Suggest` powers function **autocomplete**
+  (`matching` a typed prefix against a catalog) and **signature hints** (`activeCall` finds
+  which function and argument the caret is in) — pure string analysis, no DOM.
+- **What-if scenarios.** `Spreadsheet.Scenarios` captures named snapshots of input cells,
+  `apply`s one, or lays several side by side against result cells with `summary`.
 - **Configurable application chrome.** `Spreadsheet.Chrome` renders a **menu bar**, a
   **toolbar** and modal **dialogs** modelled on web office suites (Google Sheets / Excel for
   the web). It's declarative — the host describes menus (`Item`/`Check`/`SubMenu`/`Divider`,
@@ -145,10 +157,12 @@ src/Spreadsheet/
   Analysis.elm   what-if analysis (Goal Seek, data tables)
   Chart.elm      chart geometry (column/bar/pie/line)
   Chrome.elm     configurable menu bar + toolbar + dialogs (web-office-suite style)
+  Suggest.elm    formula autocomplete + signature help (a function catalog)
+  Scenarios.elm  what-if scenario manager (named input snapshots)
   View.elm       the class-styled HTML grid (+ View.chart)
-src/Examples.elm  a single-page gallery of 16 live, editable examples (incl. a full chrome)
+src/Examples.elm  a single-page gallery of 17 live, editable examples (chrome + authoring)
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   431 tests
+test/SpreadsheetTest.elm   454 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -215,7 +229,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 431 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 454 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
