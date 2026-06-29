@@ -34,6 +34,8 @@ import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format
 import Spreadsheet.Json as Json
 import Spreadsheet.Parser as Parser
+import Spreadsheet.Scenarios as Scenarios
+import Spreadsheet.Suggest as Suggest
 import Spreadsheet.Pivot as Pivot
 import Spreadsheet.Recalc as Recalc
 import Spreadsheet.Ref as Ref exposing (Range, Ref)
@@ -116,6 +118,13 @@ suite =
         , aggregateTests
         , jsonTests
         , depEdgeTests
+        , borderTests
+        , formulaCondTests
+        , suggestTests
+        , protectionTests
+        , filterTests
+        , nameBoxTests
+        , scenarioTests
         ]
 
 
@@ -2885,4 +2894,221 @@ depEdgeTests =
                 in
                 Expect.equal ( "1", "2", "3" )
                     ( Sheet.displayString (at "D1") s, Sheet.displayString (at "D2") s, Sheet.displayString (at "D3") s )
+        ]
+
+
+-- CELL BORDERS ---------------------------------------------------------------
+
+
+thinBlack : Style.Border
+thinBlack =
+    { style = Style.Thin, color = "#000000" }
+
+
+hasInline : String -> Sheet -> String -> Bool
+hasInline a1 sheet prop =
+    List.any (\( p, _ ) -> p == prop) (Sheet.renderedStyle (at a1) sheet).inline
+
+
+borderTests : Test
+borderTests =
+    describe "cell borders"
+        [ test "allBorders sets every edge" <|
+            \_ ->
+                let
+                    b =
+                        Sheet.borderAt (at "B2") (Sheet.allBorders (rangeOf "A1" "C3") thinBlack (Sheet.empty 10 10))
+                in
+                Expect.equal ( True, True, True, True )
+                    ( b.top /= Nothing, b.right /= Nothing, b.bottom /= Nothing, b.left /= Nothing )
+        , test "outlineBorders only borders the perimeter" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.outlineBorders (rangeOf "A1" "C3") thinBlack (Sheet.empty 10 10)
+
+                    corner =
+                        Sheet.borderAt (at "A1") s
+
+                    middle =
+                        Sheet.borderAt (at "B2") s
+                in
+                Expect.equal ( True, True, Style.noBorders ) ( corner.top /= Nothing, corner.left /= Nothing, middle )
+        , test "borders render as inline declarations" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.allBorders (rangeOf "A1" "A1") thinBlack (Sheet.empty 10 10)
+                in
+                Expect.equal True (hasInline "A1" s "border-top")
+        , test "edgeCss maps the style" <|
+            \_ -> Expect.equal "1px solid #000000" (Style.edgeCss thinBlack)
+        ]
+
+
+
+-- FORMULA-BASED CONDITIONAL FORMATTING ---------------------------------------
+
+
+formulaCondTests : Test
+formulaCondTests =
+    describe "formula-based conditional formatting"
+        [ test "a per-row formula rule fires only where true" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "5" ), ( "A3", "3" ) ]
+                            |> Sheet.addFormulaRule (rangeOf "A1" "A3") "=A1>2" (Style.toggleBold Style.emptyStyle)
+                in
+                Expect.equal ( False, True, True )
+                    ( Style.isBold (Sheet.effectiveStyle (at "A1") s)
+                    , Style.isBold (Sheet.effectiveStyle (at "A2") s)
+                    , Style.isBold (Sheet.effectiveStyle (at "A3") s)
+                    )
+        , test "a cross-column formula rule (compare two columns)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "3" ), ( "B1", "5" ), ( "A2", "8" ), ( "B2", "2" ) ]
+                            |> Sheet.addFormulaRule (rangeOf "A1" "A2") "=A1>B1" (Style.toggleBold Style.emptyStyle)
+                in
+                Expect.equal ( False, True )
+                    ( Style.isBold (Sheet.effectiveStyle (at "A1") s), Style.isBold (Sheet.effectiveStyle (at "A2") s) )
+        ]
+
+
+
+-- FORMULA AUTOCOMPLETE / SIGNATURE HELP --------------------------------------
+
+
+suggestTests : Test
+suggestTests =
+    describe "formula suggestions"
+        [ test "currentToken reads the identifier being typed" <|
+            \_ -> Expect.equal ( "SU", "" ) ( Suggest.currentToken "=SU", Suggest.currentToken "=SUM(" )
+        , test "matching finds functions by prefix" <|
+            \_ -> Expect.equal True (List.any (\d -> d.name == "SUM") (Suggest.matching "su"))
+        , test "matching is empty for an empty prefix" <|
+            \_ -> Expect.equal [] (Suggest.matching "")
+        , test "activeCall finds the function and argument index" <|
+            \_ -> Expect.equal (Just { name = "SUM", argIndex = 1 }) (Suggest.activeCall "=SUM(1,2")
+        , test "activeCall picks the innermost call" <|
+            \_ -> Expect.equal (Just { name = "SUM", argIndex = 0 }) (Suggest.activeCall "=IF(A1>1, SUM(")
+        , test "activeCall ignores commas inside strings" <|
+            \_ -> Expect.equal (Just { name = "TEXTJOIN", argIndex = 1 }) (Suggest.activeCall "=TEXTJOIN(\",\",")
+        , test "activeCall is Nothing outside any call" <|
+            \_ -> Expect.equal Nothing (Suggest.activeCall "=1+2")
+        , test "lookup returns the signature" <|
+            \_ -> Expect.equal (Just "SUM(number1, [number2], …)") (Maybe.map .signature (Suggest.lookup "sum"))
+        ]
+
+
+
+-- CELL PROTECTION ------------------------------------------------------------
+
+
+protectionTests : Test
+protectionTests =
+    describe "cell protection"
+        [ test "locked + protected blocks editing; unlocked allows it" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10
+                            |> Sheet.setLocked (rangeOf "A1" "A1") True
+                            |> Sheet.protectSheet True
+                in
+                Expect.equal ( False, True ) ( Sheet.isEditable (at "A1") s, Sheet.isEditable (at "B2") s )
+        , test "no protection means everything is editable" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.setLocked (rangeOf "A1" "A1") True (Sheet.empty 10 10)
+                in
+                Expect.equal True (Sheet.isEditable (at "A1") s)
+        ]
+
+
+
+-- AUTOFILTER -----------------------------------------------------------------
+
+
+filterFixture : Sheet
+filterFixture =
+    sheetWith
+        [ ( "A1", "West" ), ( "A2", "East" ), ( "A3", "West" ), ( "A4", "North" ) ]
+
+
+filterTests : Test
+filterTests =
+    describe "autofilter"
+        [ test "distinctValues lists sorted distinct values" <|
+            \_ -> Expect.equal [ "East", "North", "West" ] (Sheet.distinctValues 0 (rangeOf "A1" "A4") filterFixture)
+        , test "filteredOutRows hides rows not in the allowed set" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.setColumnFilter 0 (Just [ "West" ]) filterFixture
+                in
+                Expect.equal [ 1, 3 ] (Sheet.filteredOutRows (rangeOf "A1" "A4") s)
+        , test "clearing the filter hides nothing" <|
+            \_ ->
+                let
+                    s =
+                        filterFixture
+                            |> Sheet.setColumnFilter 0 (Just [ "West" ])
+                            |> Sheet.setColumnFilter 0 Nothing
+                in
+                Expect.equal [] (Sheet.filteredOutRows (rangeOf "A1" "A4") s)
+        ]
+
+
+
+-- NAME BOX -------------------------------------------------------------------
+
+
+nameBoxTests : Test
+nameBoxTests =
+    describe "name box"
+        [ test "nameForRange finds a defined name for an exact range" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.defineName "Total" (rangeOf "B2" "B5") (Sheet.empty 10 10)
+                in
+                Expect.equal ( Just "TOTAL", Nothing )
+                    ( Sheet.nameForRange (rangeOf "B2" "B5") s, Sheet.nameForRange (rangeOf "B2" "B6") s )
+        ]
+
+
+
+-- SCENARIO MANAGER -----------------------------------------------------------
+
+
+scenarioFixture : Sheet
+scenarioFixture =
+    sheetWith [ ( "A1", "10" ), ( "B1", "=A1*2" ) ]
+
+
+scenarioTests : Test
+scenarioTests =
+    describe "scenario manager"
+        [ test "capture snapshots current inputs" <|
+            \_ -> Expect.equal { name = "base", inputs = [ ( at "A1", "10" ) ] } (Scenarios.capture "base" [ at "A1" ] scenarioFixture)
+        , test "apply sets inputs and recalculates" <|
+            \_ ->
+                let
+                    s =
+                        Scenarios.apply { name = "hi", inputs = [ ( at "A1", "25" ) ] } scenarioFixture
+                in
+                expectVal (VNumber 50) (valOf "B1" s)
+        , test "summary compares scenarios against the unchanged sheet" <|
+            \_ ->
+                let
+                    scs =
+                        [ { name = "low", inputs = [ ( at "A1", "5" ) ] }
+                        , { name = "high", inputs = [ ( at "A1", "100" ) ] }
+                        ]
+                in
+                Expect.equal [ ( "low", [ "10" ] ), ( "high", [ "200" ] ) ] (Scenarios.summary scs [ at "B1" ] scenarioFixture)
         ]
