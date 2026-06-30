@@ -12,7 +12,7 @@ import/export, analytics (pivots, sparklines, charts, icon sets), and authoring 
 (**cell borders**, **formula-based conditional formatting**, **cell protection**,
 **autofilter**, **scenarios**, formula **autocomplete**) — plus a keyboard-driven,
 class-styled HTML grid to render it. The engine is pure and effect-free, so it is fully
-unit-tested without a browser (489 tests).
+unit-tested without a browser (537 tests).
 
 ![demo](docs/screenshot.png)
 
@@ -138,6 +138,29 @@ unit-tested without a browser (489 tests).
   dependency order (with circular-reference detection → `#CIRC!`). For very large sheets,
   `Spreadsheet.Recalc` slices the same work into per-frame **batches** and computes the
   **visible viewport first**, so the page never freezes.
+- **Solver (constrained optimization).** `Spreadsheet.Solver` is the big sibling of Goal
+  Seek: maximize, minimize or target an objective cell by varying **several** input cells
+  subject to `≤`/`≥`/`=` **constraints**, via a derivative-free Nelder–Mead search wrapped in
+  a penalty continuation (handles linear and smooth nonlinear models alike).
+- **Data Analysis ToolPak.** `Spreadsheet.Stats` ports the classic procedures as pure
+  functions: descriptive statistics, histogram, moving average and exponential smoothing,
+  correlation/covariance matrices, rank-and-percentile, **t-/z-/F-tests**, single-factor
+  **ANOVA**, and OLS **multiple regression** — with a real numerics core (incomplete-beta
+  Student-t and F tails), so the p-values are computed, not stubbed.
+- **Forecasting (Holt–Winters / ETS).** `Spreadsheet.Forecast` fits linear, additive and
+  multiplicative exponential-smoothing models, rolls the forecast forward any horizon, adds a
+  prediction interval and accuracy metrics, and auto-detects the season by autocorrelation.
+- **Outline grouping & Subtotal.** Collapsible row/column outline groups (nest to raise the
+  level), and a `subtotalize` command that inserts `SUBTOTAL` rows at each category break and
+  groups the detail rows beneath a grand total.
+- **Interactive PivotTable.** `Pivot.refresh` recomputes a pivot against the live sheet with
+  **slicers** (per-field filters), a column-field **crosstab**, and **show-value-as** modes
+  (% of grand total, % of column, running total).
+- **Formula auditing.** `Spreadsheet.Audit` / `Sheet.evaluateSteps` reproduce Excel's
+  **Evaluate Formula** dialog — reducing the formula one sub-expression at a time down to its
+  value — and `Sheet.circularPath` reports the cycle through a circular cell.
+- **Hyperlinks.** Per-cell hyperlink targets (`Sheet.setHyperlink`, rendered as `<a>`) plus
+  the `HYPERLINK` and `VALUETOTEXT` functions.
 
 ## Layout
 
@@ -175,7 +198,7 @@ src/Spreadsheet/
   View.elm       the class-styled HTML grid (+ View.chart)
 src/Examples.elm  a single-page gallery of 18 live, editable examples (chrome, authoring, science)
 src/spreadsheet.css   the default stylesheet (all ss-* classes)
-test/SpreadsheetTest.elm   489 tests
+test/SpreadsheetTest.elm   537 tests
 ```
 
 The engine knows nothing about the DOM; `View`/`Main` are the only modules that import
@@ -242,7 +265,7 @@ in the first frame or two while off-screen cells finish in the background.
 
 ```bash
 ELM=../../elm.sh ./build.sh    # → build/elm-spreadsheet.html  (standalone, CSS inlined)
-ELM=../../elm.sh ./test.sh     # → 489 pure-engine tests
+ELM=../../elm.sh ./test.sh     # → 537 pure-engine tests
 ```
 
 `build.sh` post-processes the compiler's output to add a viewport meta tag and inline
