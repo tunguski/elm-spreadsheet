@@ -30,6 +30,7 @@ import Spreadsheet.Csv as Csv
 import Spreadsheet.Deps as Deps
 import Spreadsheet.Export as Export
 import Spreadsheet.Find as Find
+import Spreadsheet.Forecast as Forecast
 import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format
 import Spreadsheet.Json as Json
@@ -136,6 +137,7 @@ suite =
         , dataToolTests
         , solverTests
         , statsToolpakTests
+        , forecastTests
         ]
 
 
@@ -3692,3 +3694,81 @@ matAt i j m =
         |> List.head
         |> Maybe.andThen (List.drop j >> List.head)
         |> Maybe.withDefault (0 / 0)
+
+
+forecastTests : Test
+forecastTests =
+    describe "forecasting (Holt-Winters / ETS)"
+        [ test "linear (Holt) extends a straight trend" <|
+            \_ ->
+                case Forecast.fitAndForecast (Forecast.defaultConfig 1) 3 [ 10, 12, 14, 16, 18, 20 ] of
+                    Just [ a, b, c ] ->
+                        Expect.all
+                            [ \_ -> within 0.5 22 a
+                            , \_ -> within 0.5 24 b
+                            , \_ -> within 0.5 26 c
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "expected three forecasts"
+        , test "additive seasonal reproduces a repeating pattern" <|
+            \_ ->
+                let
+                    series =
+                        [ 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40 ]
+
+                    config =
+                        { method = Forecast.Additive, period = 4, alpha = 0.4, beta = 0.05, gamma = 0.6 }
+                in
+                case Forecast.fitAndForecast config 4 series of
+                    Just [ a, b, c, d ] ->
+                        Expect.all
+                            [ \_ -> within 3 10 a
+                            , \_ -> within 3 20 b
+                            , \_ -> within 3 30 c
+                            , \_ -> within 3 40 d
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "expected four forecasts"
+        , test "detectSeason finds the period by autocorrelation" <|
+            \_ ->
+                Expect.equal 4 (Forecast.detectSeason [ 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40 ])
+        , test "fit refuses too-short seasonal series" <|
+            \_ ->
+                Expect.equal Nothing
+                    (Forecast.fit { method = Forecast.Additive, period = 4, alpha = 0.5, beta = 0.1, gamma = 0.3 } [ 1, 2, 3 ])
+        , test "accuracy is near-perfect on a clean linear fit" <|
+            \_ ->
+                let
+                    series =
+                        [ 10, 12, 14, 16, 18, 20 ]
+                in
+                case Forecast.fit (Forecast.defaultConfig 1) series of
+                    Just model ->
+                        Expect.equal True ((Forecast.accuracy model series).rmse < 1.0)
+
+                    Nothing ->
+                        Expect.fail "fit returned Nothing"
+        , test "confidence interval is non-negative and grows with horizon" <|
+            \_ ->
+                let
+                    series =
+                        [ 10, 12, 14, 16, 18, 20 ]
+                in
+                case Forecast.fit (Forecast.defaultConfig 1) series of
+                    Just model ->
+                        let
+                            near1 =
+                                Forecast.confidenceInterval 0.95 1 series model
+
+                            far =
+                                Forecast.confidenceInterval 0.95 9 series model
+                        in
+                        Expect.equal True (near1 >= 0 && far >= near1)
+
+                    Nothing ->
+                        Expect.fail "fit returned Nothing"
+        ]
