@@ -36,6 +36,7 @@ import Spreadsheet.Json as Json
 import Spreadsheet.Parser as Parser
 import Spreadsheet.Scenarios as Scenarios
 import Spreadsheet.Solver as Solver
+import Spreadsheet.Stats as Stats
 import Spreadsheet.Suggest as Suggest
 import Spreadsheet.Pivot as Pivot
 import Spreadsheet.Recalc as Recalc
@@ -134,6 +135,7 @@ suite =
         , chart2Tests
         , dataToolTests
         , solverTests
+        , statsToolpakTests
         ]
 
 
@@ -3515,3 +3517,178 @@ bowl xs =
 
         _ ->
             1.0e18
+
+
+within : Float -> Float -> Float -> Expect.Expectation
+within tol expected actual =
+    Expect.equal True (abs (expected - actual) < tol)
+
+
+statsToolpakTests : Test
+statsToolpakTests =
+    describe "data analysis toolpak (Stats)"
+        [ test "describe summarizes a classic sample" <|
+            \_ ->
+                case Stats.describe [ 2, 4, 4, 4, 5, 5, 7, 9 ] of
+                    Just d ->
+                        Expect.all
+                            [ \_ -> Expect.equal 8 d.count
+                            , \_ -> within 0.001 5 d.mean
+                            , \_ -> within 0.001 4.5 d.median
+                            , \_ -> Expect.equal (Just 4) d.mode
+                            , \_ -> within 0.001 40 d.sum
+                            , \_ -> within 0.001 7 d.range
+                            , \_ -> within 0.001 4.5714286 d.variance
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "describe returned Nothing"
+        , test "histogram buckets into equal-width bins with cumulative counts" <|
+            \_ ->
+                let
+                    bins =
+                        Stats.histogram 5 [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+                in
+                Expect.all
+                    [ \_ -> Expect.equal 5 (List.length bins)
+                    , \_ -> Expect.equal 10 (List.sum (List.map .count bins))
+                    , \_ -> Expect.equal (Just 10) (Maybe.map .cumulative (List.head (List.reverse bins)))
+                    ]
+                    ()
+        , test "movingAverage of window 3" <|
+            \_ ->
+                Expect.equal [ 2, 3, 4 ] (Stats.movingAverage 3 [ 1, 2, 3, 4, 5 ])
+        , test "exponentialSmoothing with alpha 0.5" <|
+            \_ ->
+                Expect.equal [ 4, 6, 9 ] (Stats.exponentialSmoothing 0.5 [ 4, 8, 12 ])
+        , test "correlationMatrix is 1 for perfectly correlated, -1 for anti" <|
+            \_ ->
+                let
+                    pos =
+                        Stats.correlationMatrix [ [ 1, 2, 3, 4 ], [ 2, 4, 6, 8 ] ]
+
+                    neg =
+                        Stats.correlationMatrix [ [ 1, 2, 3 ], [ 3, 2, 1 ] ]
+                in
+                Expect.all
+                    [ \_ -> within 0.0001 1 (matAt 0 1 pos)
+                    , \_ -> within 0.0001 1 (matAt 0 0 pos)
+                    , \_ -> within 0.0001 -1 (matAt 0 1 neg)
+                    ]
+                    ()
+        , test "covarianceMatrix uses the population denominator" <|
+            \_ ->
+                within 0.0001 0.6666667 (matAt 0 0 (Stats.covarianceMatrix [ [ 1, 2, 3 ] ]))
+        , test "rankAndPercentile ranks descending with inclusive percentile" <|
+            \_ ->
+                case Stats.rankAndPercentile [ 10, 30, 20 ] of
+                    [ a, b, c ] ->
+                        Expect.all
+                            [ \_ -> Expect.equal ( 1, 1, 30 ) ( a.rank, a.index, a.value )
+                            , \_ -> within 0.0001 1 a.percent
+                            , \_ -> Expect.equal ( 2, 0.5 ) ( b.rank, b.percent )
+                            , \_ -> Expect.equal ( 3, 0 ) ( c.rank, c.percent )
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "expected three entries"
+        , test "Student-t two-tailed tail matches the df=2 critical value" <|
+            \_ ->
+                within 0.005 0.05 (Stats.studentTtwoTail 4.302653 2)
+        , test "paired t-test statistic and df" <|
+            \_ ->
+                case Stats.tTestPaired [ 2, 3, 4 ] [ 1, 1, 1 ] of
+                    Just r ->
+                        Expect.all
+                            [ \_ -> within 0.001 3.4641 r.t
+                            , \_ -> within 0.001 2 r.df
+                            , \_ -> Expect.equal True (r.pTwoTail > 0 && r.pTwoTail < 0.1)
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "paired t-test returned Nothing"
+        , test "pooled and Welch t-tests agree here (equal sizes & vars)" <|
+            \_ ->
+                case ( Stats.tTestEqualVar [ 1, 2, 3, 4, 5 ] [ 3, 4, 5, 6, 7 ], Stats.tTestUnequalVar [ 1, 2, 3, 4, 5 ] [ 3, 4, 5, 6, 7 ] ) of
+                    ( Just p, Just w ) ->
+                        Expect.all
+                            [ \_ -> within 0.001 -2 p.t
+                            , \_ -> within 0.001 8 p.df
+                            , \_ -> within 0.001 -2 w.t
+                            , \_ -> within 0.001 8 w.df
+                            ]
+                            ()
+
+                    _ ->
+                        Expect.fail "t-tests returned Nothing"
+        , test "z-test of a known mean" <|
+            \_ ->
+                case Stats.zTest 4 2 [ 5, 5, 5, 5 ] of
+                    Just r ->
+                        Expect.all
+                            [ \_ -> within 0.001 1 r.z
+                            , \_ -> within 0.001 0.317311 r.pTwoTail
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "z-test returned Nothing"
+        , test "single-factor ANOVA partitions the sums of squares" <|
+            \_ ->
+                case Stats.anovaSingleFactor [ [ 1, 2, 3 ], [ 4, 5, 6 ], [ 7, 8, 9 ] ] of
+                    Just a ->
+                        Expect.all
+                            [ \_ -> within 0.001 54 a.ssBetween
+                            , \_ -> within 0.001 6 a.ssWithin
+                            , \_ -> Expect.equal ( 2, 6 ) ( a.dfBetween, a.dfWithin )
+                            , \_ -> within 0.001 27 a.f
+                            , \_ -> Expect.equal True (a.pValue < 0.01)
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "ANOVA returned Nothing"
+        , test "simple regression recovers slope and intercept" <|
+            \_ ->
+                case Stats.regress [ 2, 4, 6, 8 ] [ [ 1, 2, 3, 4 ] ] of
+                    Just r ->
+                        Expect.all
+                            [ \_ -> within 0.0001 0 (Maybe.withDefault 99 (List.head r.coefficients))
+                            , \_ -> within 0.0001 2 (Maybe.withDefault 99 (List.head (List.drop 1 r.coefficients)))
+                            , \_ -> within 0.0001 1 r.rSquared
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "regress returned Nothing"
+        , test "multiple regression recovers all coefficients" <|
+            \_ ->
+                case Stats.regress [ 9, 8, 19, 18, 29 ] [ [ 1, 2, 3, 4, 5 ], [ 2, 1, 4, 3, 6 ] ] of
+                    Just r ->
+                        case r.coefficients of
+                            [ b0, b1, b2 ] ->
+                                Expect.all
+                                    [ \_ -> within 0.001 1 b0
+                                    , \_ -> within 0.001 2 b1
+                                    , \_ -> within 0.001 3 b2
+                                    ]
+                                    ()
+
+                            _ ->
+                                Expect.fail "expected three coefficients"
+
+                    Nothing ->
+                        Expect.fail "regress returned Nothing"
+        ]
+
+
+matAt : Int -> Int -> List (List Float) -> Float
+matAt i j m =
+    m
+        |> List.drop i
+        |> List.head
+        |> Maybe.andThen (List.drop j >> List.head)
+        |> Maybe.withDefault (0 / 0)
