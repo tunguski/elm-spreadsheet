@@ -100,6 +100,8 @@ module Spreadsheet.Sheet exposing
     , traceDependents
     , setNote
     , noteAt
+    , setHyperlink
+    , hyperlinkAt
     , mergeCells
     , unmerge
     , mergeAnchorAt
@@ -193,6 +195,7 @@ type alias Model =
     , colWidths : Dict Int Int
     , names : Dict String Range
     , notes : Dict ( Int, Int ) String
+    , hyperlinks : Dict ( Int, Int ) String
     , merges : List Range
     , validations : List Valid
     , sparklines : Dict ( Int, Int ) SparkSpec
@@ -264,6 +267,7 @@ empty rows cols =
         , colWidths = Dict.empty
         , names = Dict.empty
         , notes = Dict.empty
+        , hyperlinks = Dict.empty
         , merges = []
         , validations = []
         , sparklines = Dict.empty
@@ -1488,6 +1492,7 @@ insertRows at n (Sheet m) =
             { m
                 | cells = remapCells keyMap (Refactor.insertRows at n) m.cells
                 , notes = remapKeyDict keyMap m.notes
+                , hyperlinks = remapKeyDict keyMap m.hyperlinks
                 , rows = m.rows + n
             }
         )
@@ -1505,6 +1510,7 @@ deleteRows at n (Sheet m) =
             { m
                 | cells = remapCells keyMap (Refactor.deleteRows at n) m.cells
                 , notes = remapKeyDict keyMap m.notes
+                , hyperlinks = remapKeyDict keyMap m.hyperlinks
                 , rows = max 1 (m.rows - n)
             }
         )
@@ -1522,6 +1528,7 @@ insertCols at n (Sheet m) =
             { m
                 | cells = remapCells keyMap (Refactor.insertCols at n) m.cells
                 , notes = remapKeyDict keyMap m.notes
+                , hyperlinks = remapKeyDict keyMap m.hyperlinks
                 , cols = m.cols + n
                 , colWidths = remapIntKeys (\c -> Just (insAt at n c)) m.colWidths
             }
@@ -1540,6 +1547,7 @@ deleteCols at n (Sheet m) =
             { m
                 | cells = remapCells keyMap (Refactor.deleteCols at n) m.cells
                 , notes = remapKeyDict keyMap m.notes
+                , hyperlinks = remapKeyDict keyMap m.hyperlinks
                 , cols = max 1 (m.cols - n)
                 , colWidths = remapIntKeys (delAt at n) m.colWidths
             }
@@ -2259,6 +2267,24 @@ setNote ref note (Sheet m) =
 noteAt : Ref -> Sheet -> Maybe String
 noteAt ref (Sheet m) =
     Dict.get (key ref) m.notes
+
+
+{-| Attach a hyperlink target (a URL) to a cell; an empty string removes it. Independent of
+the cell's value, so a `HYPERLINK()` formula's friendly text and the navigable target can be
+managed separately, and the link moves with the cell on insert/delete. -}
+setHyperlink : Ref -> String -> Sheet -> Sheet
+setHyperlink ref url (Sheet m) =
+    if url == "" then
+        Sheet { m | hyperlinks = Dict.remove (key ref) m.hyperlinks }
+
+    else
+        Sheet { m | hyperlinks = Dict.insert (key ref) url m.hyperlinks }
+
+
+{-| The hyperlink target on a cell, if any. -}
+hyperlinkAt : Ref -> Sheet -> Maybe String
+hyperlinkAt ref (Sheet m) =
+    Dict.get (key ref) m.hyperlinks
 
 
 

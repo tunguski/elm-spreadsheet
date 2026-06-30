@@ -115,7 +115,7 @@ knownNames =
     , "CONCAT", "CONCATENATE", "TEXTJOIN", "LEN", "LEFT", "RIGHT", "MID"
     , "UPPER", "LOWER", "TRIM", "CLEAN", "PROPER", "REPT", "REPLACE"
     , "SUBSTITUTE", "FIND", "SEARCH", "EXACT", "VALUE", "CHAR", "CODE", "T"
-    , "TEXT", "TEXTBEFORE", "TEXTAFTER", "ARRAYTOTEXT"
+    , "TEXT", "TEXTBEFORE", "TEXTAFTER", "ARRAYTOTEXT", "VALUETOTEXT", "HYPERLINK"
 
     -- functional / structured / audit
     , "XMATCH", "ERROR.TYPE"
@@ -449,6 +449,48 @@ call name args =
             case args of
                 a :: _ ->
                     VText (String.join ", " (List.map Value.toText (flatten [ a ])))
+
+                [] ->
+                    VError ValueErr
+
+        "VALUETOTEXT" ->
+            case vals of
+                v :: rest ->
+                    let
+                        strict =
+                            case rest of
+                                f :: _ ->
+                                    case Value.toNumber f of
+                                        Ok n ->
+                                            n >= 0.5
+
+                                        Err _ ->
+                                            False
+
+                                [] ->
+                                    False
+                    in
+                    case v of
+                        VText s ->
+                            if strict then
+                                VText ("\"" ++ s ++ "\"")
+
+                            else
+                                VText s
+
+                        _ ->
+                            VText (Value.toText v)
+
+                [] ->
+                    VError ValueErr
+
+        "HYPERLINK" ->
+            case vals of
+                _ :: label :: _ ->
+                    VText (Value.toText label)
+
+                url :: [] ->
+                    VText (Value.toText url)
 
                 [] ->
                     VError ValueErr

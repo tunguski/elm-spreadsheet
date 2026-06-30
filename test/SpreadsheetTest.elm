@@ -141,6 +141,7 @@ suite =
         , outlineTests
         , evalStepTests
         , pivotInteractiveTests
+        , hyperlinkTests
         ]
 
 
@@ -3697,6 +3698,51 @@ matAt i j m =
         |> List.head
         |> Maybe.andThen (List.drop j >> List.head)
         |> Maybe.withDefault (0 / 0)
+
+
+hyperlinkTests : Test
+hyperlinkTests =
+    describe "hyperlinks & value-to-text"
+        [ test "HYPERLINK returns the friendly label" <|
+            \_ ->
+                Expect.equal (VText "Anthropic")
+                    (valOf "A1" (sheetWith [ ( "A1", "=HYPERLINK(\"https://anthropic.com\",\"Anthropic\")" ) ]))
+        , test "HYPERLINK with no label returns the url" <|
+            \_ ->
+                Expect.equal (VText "https://x.test")
+                    (valOf "A1" (sheetWith [ ( "A1", "=HYPERLINK(\"https://x.test\")" ) ]))
+        , test "VALUETOTEXT renders a number as text" <|
+            \_ ->
+                Expect.equal (VText "123") (valOf "A1" (sheetWith [ ( "A1", "=VALUETOTEXT(123)" ) ]))
+        , test "VALUETOTEXT strict mode quotes text" <|
+            \_ ->
+                Expect.equal ( VText "hi", VText "\"hi\"" )
+                    ( valOf "A1" (sheetWith [ ( "A1", "=VALUETOTEXT(\"hi\")" ) ])
+                    , valOf "A2" (sheetWith [ ( "A2", "=VALUETOTEXT(\"hi\",1)" ) ])
+                    )
+        , test "setHyperlink / hyperlinkAt store a navigable target" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10 |> Sheet.setHyperlink (at "A1") "https://x.test"
+                in
+                Expect.all
+                    [ \_ -> Expect.equal (Just "https://x.test") (Sheet.hyperlinkAt (at "A1") s)
+                    , \_ -> Expect.equal Nothing (Sheet.hyperlinkAt (at "B1") s)
+                    , \_ -> Expect.equal Nothing (Sheet.hyperlinkAt (at "A1") (Sheet.setHyperlink (at "A1") "" s))
+                    ]
+                    ()
+        , test "a hyperlink moves with its cell when rows are inserted" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 10 10
+                            |> Sheet.setHyperlink (at "A1") "https://x.test"
+                            |> Sheet.insertRows 0 1
+                in
+                Expect.equal ( Just "https://x.test", Nothing )
+                    ( Sheet.hyperlinkAt (at "A2") s, Sheet.hyperlinkAt (at "A1") s )
+        ]
 
 
 pivotInteractiveTests : Test

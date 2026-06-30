@@ -26,7 +26,7 @@ Appearance is almost entirely CSS classes (`ss-*`); only data-driven colour is i
 
 -}
 
-import Html exposing (Html, div, input, option, select, span, table, tbody, td, text, th, thead, tr)
+import Html exposing (Html, a, div, input, option, select, span, table, tbody, td, text, th, thead, tr)
 import Html.Attributes as HA
 import Html.Events as HE
 import Json.Decode
@@ -345,6 +345,24 @@ dataRow config sheet row =
         )
 
 
+{-| The cell's display text, wrapped in an anchor when the cell carries a hyperlink target
+(`Sheet.setHyperlink`). -}
+cellLabel : Ref -> Sheet -> Html msg
+cellLabel ref sheet =
+    let
+        label =
+            Sheet.displayString ref sheet
+    in
+    case Sheet.hyperlinkAt ref sheet of
+        Just url ->
+            a
+                [ HA.class "ss-cell-link", HA.href url, HA.target "_blank", HA.rel "noopener noreferrer" ]
+                [ text label ]
+
+        Nothing ->
+            text label
+
+
 cell : Config msg -> Sheet -> Ref -> Html msg
 cell config sheet ref =
     if isEditing config ref then
@@ -508,7 +526,7 @@ displayCell config sheet ref =
 
                 Nothing ->
                     div [ HA.class "ss-cell-content" ]
-                        (iconSpan ref sheet ++ [ text (Sheet.displayString ref sheet) ])
+                        (iconSpan ref sheet ++ [ cellLabel ref sheet ])
     in
     td
         (classAttr

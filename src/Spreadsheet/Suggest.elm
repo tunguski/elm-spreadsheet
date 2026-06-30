@@ -61,6 +61,8 @@ catalog =
     , { name = "LEN", signature = "LEN(text)", summary = "The length of text." }
     , { name = "SUBSTITUTE", signature = "SUBSTITUTE(text, old, new, [n])", summary = "Replaces text." }
     , { name = "REGEXEXTRACT", signature = "REGEXEXTRACT(text, pattern, [ci])", summary = "The first regex match (or group)." }
+    , { name = "VALUETOTEXT", signature = "VALUETOTEXT(value, [format])", summary = "Renders a value as text (format 1 quotes text)." }
+    , { name = "HYPERLINK", signature = "HYPERLINK(url, [label])", summary = "Shows label (or url) as a link's friendly text." }
     , { name = "SORT", signature = "SORT(range, [col], [asc])", summary = "Sorts a range (spills)." }
     , { name = "FILTER", signature = "FILTER(range, include, [if_empty])", summary = "Keeps rows where include is true (spills)." }
     , { name = "UNIQUE", signature = "UNIQUE(range)", summary = "The distinct rows of a range (spills)." }
