@@ -140,6 +140,7 @@ suite =
         , forecastTests
         , outlineTests
         , evalStepTests
+        , pivotInteractiveTests
         ]
 
 
@@ -3696,6 +3697,109 @@ matAt i j m =
         |> List.head
         |> Maybe.andThen (List.drop j >> List.head)
         |> Maybe.withDefault (0 / 0)
+
+
+pivotInteractiveTests : Test
+pivotInteractiveTests =
+    let
+        flat =
+            sheetWith
+                [ ( "A1", "Region" ), ( "B1", "Amount" )
+                , ( "A2", "East" ), ( "B2", "10" )
+                , ( "A3", "East" ), ( "B3", "20" )
+                , ( "A4", "West" ), ( "B4", "30" )
+                , ( "A5", "West" ), ( "B5", "40" )
+                ]
+
+        crosstab =
+            sheetWith
+                [ ( "A1", "Region" ), ( "B1", "Amount" ), ( "C1", "Quarter" )
+                , ( "A2", "East" ), ( "B2", "10" ), ( "C2", "Q1" )
+                , ( "A3", "East" ), ( "B3", "20" ), ( "C3", "Q2" )
+                , ( "A4", "West" ), ( "B4", "30" ), ( "C4", "Q1" )
+                , ( "A5", "West" ), ( "B5", "40" ), ( "C5", "Q2" )
+                ]
+
+        base =
+            { rowField = 0, colField = Nothing, valueCol = 1, agg = Pivot.Sum, slicers = [], showAs = Pivot.Raw }
+
+        rowTotal key m =
+            Pivot.refresh m (rangeOf "A1" "B5") flat
+                |> .rows
+                |> List.filter (\r -> r.key == key)
+                |> List.head
+                |> Maybe.map .total
+    in
+    describe "interactive pivot (slicers / show-as / refresh)"
+        [ test "raw refresh groups and totals" <|
+            \_ ->
+                let
+                    m =
+                        Pivot.refresh base (rangeOf "A1" "B5") flat
+                in
+                Expect.all
+                    [ \_ -> Expect.equal 2 (List.length m.rows)
+                    , \_ -> Expect.equal (Just 30) (rowTotal "East" base)
+                    , \_ -> Expect.equal (Just 70) (rowTotal "West" base)
+                    , \_ -> within 0.0001 100 m.grandTotal
+                    ]
+                    ()
+        , test "a slicer restricts the source rows" <|
+            \_ ->
+                let
+                    m =
+                        Pivot.refresh { base | slicers = [ { field = 0, allowed = [ "East" ] } ] } (rangeOf "A1" "B5") flat
+                in
+                Expect.all
+                    [ \_ -> Expect.equal [ "East" ] (List.map .key m.rows)
+                    , \_ -> within 0.0001 30 m.grandTotal
+                    ]
+                    ()
+        , test "percent of grand total" <|
+            \_ ->
+                let
+                    m =
+                        Pivot.refresh { base | showAs = Pivot.PercentOfGrandTotal } (rangeOf "A1" "B5") flat
+
+                    east =
+                        m.rows |> List.filter (\r -> r.key == "East") |> List.head |> Maybe.map .total
+                in
+                case east of
+                    Just t ->
+                        within 0.001 30 t
+
+                    Nothing ->
+                        Expect.fail "no East row"
+        , test "running total accumulates down the rows" <|
+            \_ ->
+                let
+                    m =
+                        Pivot.refresh { base | showAs = Pivot.RunningTotal } (rangeOf "A1" "B5") flat
+
+                    west =
+                        m.rows |> List.filter (\r -> r.key == "West") |> List.head |> Maybe.map .total
+                in
+                Expect.equal (Just 100) west
+        , test "column field makes a crosstab with column totals" <|
+            \_ ->
+                let
+                    m =
+                        Pivot.refresh
+                            { rowField = 0, colField = Just 2, valueCol = 1, agg = Pivot.Sum, slicers = [], showAs = Pivot.Raw }
+                            (rangeOf "A1" "C5")
+                            crosstab
+
+                    east =
+                        m.rows |> List.filter (\r -> r.key == "East") |> List.head |> Maybe.map .values
+                in
+                Expect.all
+                    [ \_ -> Expect.equal [ "Q1", "Q2" ] m.columns
+                    , \_ -> Expect.equal (Just [ 10, 20 ]) east
+                    , \_ -> Expect.equal [ 40, 60 ] m.columnTotals
+                    , \_ -> within 0.0001 100 m.grandTotal
+                    ]
+                    ()
+        ]
 
 
 evalStepTests : Test

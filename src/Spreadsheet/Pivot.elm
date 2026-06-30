@@ -5,6 +5,12 @@ module Spreadsheet.Pivot exposing
     , aggName
     , TableConfig
     , pivotTable
+    , ShowAs(..)
+    , Slicer
+    , Interactive
+    , PivotMatrix
+    , PivotRow
+    , refresh
     )
 
 {-| Summarise a range by grouping its rows on one column and aggregating another — a
@@ -353,3 +359,215 @@ aggName agg =
 
         Max ->
             "Max"
+
+
+
+-- INTERACTIVE PIVOT ----------------------------------------------------------
+
+
+{-| A "show value as" display mode for the pivot body. -}
+type ShowAs
+    = Raw
+    | PercentOfGrandTotal
+    | PercentOfColumnTotal
+    | RunningTotal
+
+
+{-| A slicer: keep only rows whose value in `field` (an absolute column index) is one of
+`allowed`. An empty `allowed` list imposes no restriction (the slicer is "all selected"). -}
+type alias Slicer =
+    { field : Int, allowed : List String }
+
+
+{-| An interactive pivot bound to a source: one row field, an optional column field, a value
+column and aggregate, a set of slicers (filters), and a display mode. `refresh` recomputes it
+against the current sheet, so editing source cells and calling `refresh` again updates it. -}
+type alias Interactive =
+    { rowField : Int
+    , colField : Maybe Int
+    , valueCol : Int
+    , agg : Agg
+    , slicers : List Slicer
+    , showAs : ShowAs
+    }
+
+
+{-| One body row of the result: the row key, the per-column aggregates, and the row total. -}
+type alias PivotRow =
+    { key : String, values : List Float, total : Float }
+
+
+{-| A computed interactive pivot: the column keys (empty when there is no column field), the
+body rows, the per-column totals and the grand total — all already transformed by `showAs`. -}
+type alias PivotMatrix =
+    { columns : List String
+    , rows : List PivotRow
+    , columnTotals : List Float
+    , grandTotal : Float
+    }
+
+
+{-| Recompute the interactive pivot against the data rows of `range` (excluding the header
+row), applying its slicers and display mode. -}
+refresh : Interactive -> Range -> Sheet -> PivotMatrix
+refresh cfg range sheet =
+    let
+        n =
+            Ref.normalize range
+
+        dataRows =
+            List.range (n.start.row + 1) n.end.row
+
+        txt c r =
+            Value.toText (Sheet.valueAt { col = c, row = r } sheet)
+
+        passesSlicers r =
+            List.all
+                (\s ->
+                    List.isEmpty s.allowed || List.member (txt s.field r) s.allowed
+                )
+                cfg.slicers
+
+        keptRows =
+            List.filter passesSlicers dataRows
+
+        columns =
+            case cfg.colField of
+                Just cf ->
+                    distinctSorted (List.map (txt cf) keptRows)
+
+                Nothing ->
+                    []
+
+        rowKeys =
+            distinctSorted (List.map (txt cfg.rowField) keptRows)
+
+        valueAtRow r =
+            Sheet.valueAt { col = cfg.valueCol, row = r } sheet
+
+        aggCell rowKey colKey =
+            keptRows
+                |> List.filter (\r -> txt cfg.rowField r == rowKey)
+                |> List.filter (\r -> Maybe.map (\cf -> txt cf r == colKey) cfg.colField |> Maybe.withDefault True)
+                |> List.map valueAtRow
+                |> aggregate cfg.agg
+                |> toFloatDefault
+
+        rawValuesFor rowKey =
+            case columns of
+                [] ->
+                    [ aggCell rowKey "" ]
+
+                _ ->
+                    List.map (aggCell rowKey) columns
+
+        aggColumn colKey =
+            keptRows
+                |> List.filter (\r -> Maybe.map (\cf -> txt cf r == colKey) cfg.colField |> Maybe.withDefault True)
+                |> List.map valueAtRow
+                |> aggregate cfg.agg
+                |> toFloatDefault
+
+        columnTotalsRaw =
+            case columns of
+                [] ->
+                    [ aggColumn "" ]
+
+                _ ->
+                    List.map aggColumn columns
+
+        grandRaw =
+            keptRows
+                |> List.map valueAtRow
+                |> aggregate cfg.agg
+                |> toFloatDefault
+
+        rawRows =
+            List.map (\rk -> { key = rk, values = rawValuesFor rk, total = List.sum (rawValuesFor rk) }) rowKeys
+    in
+    applyShowAs cfg.showAs
+        { columns = columns
+        , rows = rawRows
+        , columnTotals = columnTotalsRaw
+        , grandTotal = grandRaw
+        }
+
+
+toFloatDefault : Value -> Float
+toFloatDefault v =
+    case Value.toNumber v of
+        Ok x ->
+            x
+
+        Err _ ->
+            0
+
+
+applyShowAs : ShowAs -> PivotMatrix -> PivotMatrix
+applyShowAs mode matrix =
+    case mode of
+        Raw ->
+            matrix
+
+        PercentOfGrandTotal ->
+            mapCells (\_ x -> pct x matrix.grandTotal) matrix
+
+        PercentOfColumnTotal ->
+            mapCells (\colIndex x -> pct x (Maybe.withDefault 0 (listGet colIndex matrix.columnTotals))) matrix
+
+        RunningTotal ->
+            { matrix | rows = runningDown matrix.rows }
+
+
+pct : Float -> Float -> Float
+pct x total =
+    if total == 0 then
+        0
+
+    else
+        x / total * 100
+
+
+{-| Transform every body cell by `f columnIndex value`; row totals and grand total are
+recomputed/transformed consistently. -}
+mapCells : (Int -> Float -> Float) -> PivotMatrix -> PivotMatrix
+mapCells f matrix =
+    { matrix
+        | rows =
+            List.map
+                (\row ->
+                    let
+                        vs =
+                            List.indexedMap f row.values
+                    in
+                    { row | values = vs, total = List.sum vs }
+                )
+                matrix.rows
+        , columnTotals = List.indexedMap f matrix.columnTotals
+    }
+
+
+{-| Cumulative sum of each column down the rows. -}
+runningDown : List PivotRow -> List PivotRow
+runningDown rows =
+    let
+        step row ( accCols, out ) =
+            let
+                newCols =
+                    List.map2 (+) (padTo (List.length row.values) accCols) row.values
+            in
+            ( newCols, { row | values = newCols, total = List.sum newCols } :: out )
+    in
+    List.foldl step ( [], [] ) rows
+        |> Tuple.second
+        |> List.reverse
+
+
+padTo : Int -> List Float -> List Float
+padTo n xs =
+    xs ++ List.repeat (max 0 (n - List.length xs)) 0
+
+
+listGet : Int -> List a -> Maybe a
+listGet i xs =
+    List.head (List.drop i xs)
