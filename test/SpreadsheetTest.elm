@@ -138,6 +138,7 @@ suite =
         , solverTests
         , statsToolpakTests
         , forecastTests
+        , outlineTests
         ]
 
 
@@ -3694,6 +3695,87 @@ matAt i j m =
         |> List.head
         |> Maybe.andThen (List.drop j >> List.head)
         |> Maybe.withDefault (0 / 0)
+
+
+outlineTests : Test
+outlineTests =
+    describe "outline grouping & subtotal"
+        [ test "groupRows sets outline level and collapse hides rows" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 20 5
+                            |> Sheet.groupRows 1 3
+                in
+                Expect.all
+                    [ \_ -> Expect.equal 1 (Sheet.rowOutlineLevel 2 s)
+                    , \_ -> Expect.equal 0 (Sheet.rowOutlineLevel 5 s)
+                    , \_ -> Expect.equal False (Sheet.isRowHidden 2 s)
+                    , \_ -> Expect.equal True (Sheet.isRowHidden 2 (Sheet.setRowsCollapsed 1 3 True s))
+                    , \_ -> Expect.equal False (Sheet.isRowHidden 0 (Sheet.setRowsCollapsed 1 3 True s))
+                    ]
+                    ()
+        , test "nested groups raise the outline level" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 20 5 |> Sheet.groupRows 1 6 |> Sheet.groupRows 2 4
+                in
+                Expect.equal ( 2, 1 ) ( Sheet.rowOutlineLevel 3 s, Sheet.rowOutlineLevel 1 s )
+        , test "ungroup removes the matching group" <|
+            \_ ->
+                let
+                    s =
+                        Sheet.empty 20 5 |> Sheet.groupRows 1 3 |> Sheet.ungroupRows 1 3
+                in
+                Expect.equal 0 (Sheet.rowOutlineLevel 2 s)
+        , test "subtotalize inserts per-group subtotals and a grand total" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "East" ), ( "B1", "10" )
+                            , ( "A2", "East" ), ( "B2", "20" )
+                            , ( "A3", "West" ), ( "B3", "30" )
+                            , ( "A4", "West" ), ( "B4", "40" )
+                            ]
+                            |> Sheet.subtotalize (rangeOf "A1" "B4") 0 1
+                            |> Sheet.recalcAll
+                in
+                -- East rows, East Total (30), West rows, West Total (70), Grand Total (100)
+                Expect.equal
+                    ( VText "East Total", VNumber 30, VText "West Total", VNumber 70 )
+                    ( valOf "A3" s, valOf "B3" s, valOf "A6" s, valOf "B6" s )
+        , test "subtotalize grand total sums the groups" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "East" ), ( "B1", "10" )
+                            , ( "A2", "East" ), ( "B2", "20" )
+                            , ( "A3", "West" ), ( "B3", "30" )
+                            , ( "A4", "West" ), ( "B4", "40" )
+                            ]
+                            |> Sheet.subtotalize (rangeOf "A1" "B4") 0 1
+                            |> Sheet.recalcAll
+                in
+                Expect.equal ( VText "Grand Total", VNumber 100 ) ( valOf "A7" s, valOf "B7" s )
+        , test "subtotalize groups the detail rows of each category" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "East" ), ( "B1", "10" )
+                            , ( "A2", "East" ), ( "B2", "20" )
+                            , ( "A3", "West" ), ( "B3", "30" )
+                            , ( "A4", "West" ), ( "B4", "40" )
+                            ]
+                            |> Sheet.subtotalize (rangeOf "A1" "B4") 0 1
+                in
+                -- East detail = rows 0..1, West detail (after one inserted row) = rows 3..4
+                Expect.equal ( 1, 1, 0 )
+                    ( Sheet.rowOutlineLevel 0 s, Sheet.rowOutlineLevel 3 s, Sheet.rowOutlineLevel 2 s )
+        ]
 
 
 forecastTests : Test

@@ -34,6 +34,20 @@ module Spreadsheet.Sheet exposing
     , columnFilter
     , filteredOutRows
     , distinctValues
+    , OutlineGroup
+    , groupRows
+    , groupCols
+    , ungroupRows
+    , ungroupCols
+    , setRowsCollapsed
+    , setColsCollapsed
+    , rowGroupList
+    , colGroupList
+    , rowOutlineLevel
+    , colOutlineLevel
+    , isRowHidden
+    , isColHidden
+    , subtotalize
     , nameForRange
     , recalcAll
     , recalcAllWith
@@ -189,7 +203,16 @@ type alias Model =
     , locked : Dict ( Int, Int ) Bool
     , protected : Bool
     , colFilters : Dict Int (List String)
+    , rowGroups : List OutlineGroup
+    , colGroups : List OutlineGroup
     }
+
+
+{-| An outline group over a contiguous run of rows (or columns): the inclusive `start`/`end`
+index and whether it is currently `collapsed` (its detail rows hidden). Groups may nest, so a
+row's outline *level* is how many groups contain it. -}
+type alias OutlineGroup =
+    { start : Int, end : Int, collapsed : Bool }
 
 
 {-| A formula-based conditional-format rule: when the formula `expr` (evaluated with the
@@ -251,6 +274,8 @@ empty rows cols =
         , locked = Dict.empty
         , protected = False
         , colFilters = Dict.empty
+        , rowGroups = []
+        , colGroups = []
         }
 
 
@@ -703,6 +728,237 @@ dedupStrings seen xs =
 
             else
                 dedupStrings (x :: seen) rest
+
+
+
+-- OUTLINE GROUPING -----------------------------------------------------------
+
+
+{-| Group rows `start..end` (inclusive) into an outline group, expanded. Nesting is allowed:
+grouping a sub-range of an existing group increases the inner rows' outline level. -}
+groupRows : Int -> Int -> Sheet -> Sheet
+groupRows start end (Sheet m) =
+    Sheet { m | rowGroups = addGroup start end m.rowGroups }
+
+
+{-| Group columns `start..end` (inclusive) into an outline group, expanded. -}
+groupCols : Int -> Int -> Sheet -> Sheet
+groupCols start end (Sheet m) =
+    Sheet { m | colGroups = addGroup start end m.colGroups }
+
+
+{-| Remove the row group exactly spanning `start..end` (if any). -}
+ungroupRows : Int -> Int -> Sheet -> Sheet
+ungroupRows start end (Sheet m) =
+    Sheet { m | rowGroups = removeGroup start end m.rowGroups }
+
+
+{-| Remove the column group exactly spanning `start..end` (if any). -}
+ungroupCols : Int -> Int -> Sheet -> Sheet
+ungroupCols start end (Sheet m) =
+    Sheet { m | colGroups = removeGroup start end m.colGroups }
+
+
+{-| Collapse or expand the row group exactly spanning `start..end`. -}
+setRowsCollapsed : Int -> Int -> Bool -> Sheet -> Sheet
+setRowsCollapsed start end collapsed (Sheet m) =
+    Sheet { m | rowGroups = setCollapsed start end collapsed m.rowGroups }
+
+
+{-| Collapse or expand the column group exactly spanning `start..end`. -}
+setColsCollapsed : Int -> Int -> Bool -> Sheet -> Sheet
+setColsCollapsed start end collapsed (Sheet m) =
+    Sheet { m | colGroups = setCollapsed start end collapsed m.colGroups }
+
+
+{-| The row groups, innermost (narrowest) first — the order a view gutter wants. -}
+rowGroupList : Sheet -> List OutlineGroup
+rowGroupList (Sheet m) =
+    List.sortBy (\g -> g.end - g.start) m.rowGroups
+
+
+{-| The column groups, innermost first. -}
+colGroupList : Sheet -> List OutlineGroup
+colGroupList (Sheet m) =
+    List.sortBy (\g -> g.end - g.start) m.colGroups
+
+
+{-| How many groups contain row `r` (0 = ungrouped). -}
+rowOutlineLevel : Int -> Sheet -> Int
+rowOutlineLevel r (Sheet m) =
+    List.length (List.filter (\g -> g.start <= r && r <= g.end) m.rowGroups)
+
+
+{-| How many groups contain column `c` (0 = ungrouped). -}
+colOutlineLevel : Int -> Sheet -> Int
+colOutlineLevel c (Sheet m) =
+    List.length (List.filter (\g -> g.start <= c && c <= g.end) m.colGroups)
+
+
+{-| True when row `r` falls inside any collapsed row group (and so should be hidden). -}
+isRowHidden : Int -> Sheet -> Bool
+isRowHidden r (Sheet m) =
+    List.any (\g -> g.collapsed && g.start <= r && r <= g.end) m.rowGroups
+
+
+{-| True when column `c` falls inside any collapsed column group. -}
+isColHidden : Int -> Sheet -> Bool
+isColHidden c (Sheet m) =
+    List.any (\g -> g.collapsed && g.start <= c && c <= g.end) m.colGroups
+
+
+addGroup : Int -> Int -> List OutlineGroup -> List OutlineGroup
+addGroup start end groups =
+    let
+        ( lo, hi ) =
+            ( min start end, max start end )
+    in
+    if List.any (\g -> g.start == lo && g.end == hi) groups then
+        groups
+
+    else
+        { start = lo, end = hi, collapsed = False } :: groups
+
+
+removeGroup : Int -> Int -> List OutlineGroup -> List OutlineGroup
+removeGroup start end groups =
+    let
+        ( lo, hi ) =
+            ( min start end, max start end )
+    in
+    List.filter (\g -> not (g.start == lo && g.end == hi)) groups
+
+
+setCollapsed : Int -> Int -> Bool -> List OutlineGroup -> List OutlineGroup
+setCollapsed start end collapsed groups =
+    let
+        ( lo, hi ) =
+            ( min start end, max start end )
+    in
+    List.map
+        (\g ->
+            if g.start == lo && g.end == hi then
+                { g | collapsed = collapsed }
+
+            else
+                g
+        )
+        groups
+
+
+{-| **Data ▸ Subtotal**: over the data `range` (assumed already sorted by the key column),
+insert a `SUBTOTAL(9, …)` summary row after each run of equal values in the key column
+`keyCol` (an absolute column index), summing the `valueCol` column, then append a grand-total
+row. The inserted detail runs are wrapped in collapsible outline groups. Returns the sheet
+ready for `recalcAll`. -}
+subtotalize : Range -> Int -> Int -> Sheet -> Sheet
+subtotalize range keyCol valueCol sheet =
+    let
+        n =
+            Ref.normalize range
+
+        rows =
+            List.range n.start.row n.end.row
+
+        keyAt r =
+            displayString { col = keyCol, row = r } sheet
+
+        -- Inclusive [start,end] row spans of equal consecutive key values.
+        runs =
+            List.foldl
+                (\r acc ->
+                    case acc of
+                        ( runStart, prevKey ) :: rest ->
+                            if keyAt r == prevKey then
+                                acc
+
+                            else
+                                ( r, keyAt r ) :: ( runStart, prevKey ) :: rest
+
+                        [] ->
+                            [ ( r, keyAt r ) ]
+                )
+                []
+                rows
+                |> List.reverse
+
+        spans =
+            spansOf runs n.end.row
+    in
+    applySubtotals spans keyCol valueCol n.end.row sheet
+
+
+{-| Turn run-start markers into inclusive `(start, end, key)` spans. -}
+spansOf : List ( Int, String ) -> Int -> List ( Int, Int, String )
+spansOf runs lastRow =
+    case runs of
+        [] ->
+            []
+
+        ( s, key ) :: rest ->
+            let
+                end =
+                    case rest of
+                        ( nextStart, _ ) :: _ ->
+                            nextStart - 1
+
+                        [] ->
+                            lastRow
+            in
+            ( s, end, key ) :: spansOf rest lastRow
+
+
+{-| Insert subtotal rows bottom-up (so earlier row indices stay valid), add the outline
+groups at their post-shift positions, then append a grand total. -}
+applySubtotals : List ( Int, Int, String ) -> Int -> Int -> Int -> Sheet -> Sheet
+applySubtotals spans keyCol valueCol lastRow sheet =
+    let
+        withSubtotals =
+            List.foldr
+                (\( start, end, key ) acc ->
+                    insertSubtotalRow start end key keyCol valueCol acc
+                )
+                sheet
+                spans
+
+        -- The i-th span (top to bottom) has i subtotal rows inserted above it, so its detail
+        -- rows end up shifted down by i.
+        grouped =
+            List.indexedMap (\i ( start, end, _ ) -> ( start + i, end + i )) spans
+                |> List.foldl (\( s, e ) acc -> groupRows s e acc) withSubtotals
+
+        grandRow =
+            lastRow + List.length spans + 1
+
+        -- Each span's subtotal row ends up at `end + i + 1` (i = its 0-based position, the
+        -- count of subtotal rows inserted above it). Summing those cells is the grand total —
+        -- exact regardless of whether SUBTOTAL excludes nested subtotals.
+        subtotalCells =
+            List.indexedMap (\i ( _, end, _ ) -> Ref.toA1 { col = valueCol, row = end + i + 1 }) spans
+
+        grandFormula =
+            "=" ++ String.join "+" subtotalCells
+    in
+    grouped
+        |> setRaw { col = keyCol, row = grandRow } "Grand Total"
+        |> setRaw { col = valueCol, row = grandRow } grandFormula
+
+
+insertSubtotalRow : Int -> Int -> String -> Int -> Int -> Sheet -> Sheet
+insertSubtotalRow start end key keyCol valueCol sheet =
+    let
+        subtotalRow =
+            end + 1
+
+        valueRange =
+            Ref.toA1 { col = valueCol, row = start }
+                ++ ":"
+                ++ Ref.toA1 { col = valueCol, row = end }
+    in
+    sheet
+        |> insertRows subtotalRow 1
+        |> setRaw { col = keyCol, row = subtotalRow } (key ++ " Total")
+        |> setRaw { col = valueCol, row = subtotalRow } ("=SUBTOTAL(9," ++ valueRange ++ ")")
 
 
 
