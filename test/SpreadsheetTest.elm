@@ -35,6 +35,7 @@ import Spreadsheet.Format as Format
 import Spreadsheet.Json as Json
 import Spreadsheet.Parser as Parser
 import Spreadsheet.Scenarios as Scenarios
+import Spreadsheet.Solver as Solver
 import Spreadsheet.Suggest as Suggest
 import Spreadsheet.Pivot as Pivot
 import Spreadsheet.Recalc as Recalc
@@ -132,6 +133,7 @@ suite =
         , pivotTableTests
         , chart2Tests
         , dataToolTests
+        , solverTests
         ]
 
 
@@ -3409,3 +3411,107 @@ dataToolTests =
                 -- East/1, East/9, West/2
                 Expect.equal ( VText "East", normVal (VNumber 1), VText "West" ) ( valOf "A1" s, normVal (valOf "B1" s), valOf "A3" s )
         ]
+
+
+solverTests : Test
+solverTests =
+    describe "solver (constrained optimization)"
+        [ test "minimize finds the vertex of a smooth quadratic bowl" <|
+            \_ ->
+                let
+                    solution =
+                        Solver.minimize (\xs -> bowl xs) [ 0, 0 ]
+                in
+                case solution of
+                    [ x, y ] ->
+                        Expect.all [ \_ -> near 1 x, \_ -> near 2 y ] ()
+
+                    _ ->
+                        Expect.fail "expected a 2-element solution"
+        , test "maximize a linear objective hits the LP optimum on the boundary" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "0" )
+                            , ( "A2", "0" )
+                            , ( "A3", "=3*A1+2*A2" )
+                            , ( "A4", "=A1+A2" )
+                            ]
+
+                    problem =
+                        { objective = at "A3"
+                        , goal = Solver.Maximize
+                        , variables = [ at "A1", at "A2" ]
+                        , constraints =
+                            [ { cell = at "A4", op = Solver.LessEq, bound = 4 }
+                            , { cell = at "A1", op = Solver.LessEq, bound = 3 }
+                            , { cell = at "A2", op = Solver.LessEq, bound = 3 }
+                            , { cell = at "A1", op = Solver.GreaterEq, bound = 0 }
+                            , { cell = at "A2", op = Solver.GreaterEq, bound = 0 }
+                            ]
+                        }
+                in
+                case Solver.solve problem s of
+                    Just result ->
+                        Expect.all
+                            [ \_ -> Expect.equal True (abs (result.objective - 11) < 0.05)
+                            , \_ -> Expect.equal True result.feasible
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "solver returned Nothing"
+        , test "minimize a nonlinear objective with two variables" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith
+                            [ ( "A1", "0" )
+                            , ( "A2", "0" )
+                            , ( "A3", "=(A1-3)^2+(A2-5)^2" )
+                            ]
+
+                    problem =
+                        { objective = at "A3"
+                        , goal = Solver.Minimize
+                        , variables = [ at "A1", at "A2" ]
+                        , constraints = []
+                        }
+                in
+                case Solver.solve problem s of
+                    Just result ->
+                        Expect.equal True (result.objective < 0.001)
+
+                    Nothing ->
+                        Expect.fail "solver returned Nothing"
+        , test "TargetValue subsumes goal seek (solve A1^2 = 9)" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "1" ), ( "A2", "=A1*A1" ) ]
+
+                    problem =
+                        { objective = at "A2"
+                        , goal = Solver.TargetValue 9
+                        , variables = [ at "A1" ]
+                        , constraints = []
+                        }
+                in
+                case Solver.solve problem s of
+                    Just result ->
+                        Expect.equal True (abs (result.objective - 9) < 0.01)
+
+                    Nothing ->
+                        Expect.fail "solver returned Nothing"
+        ]
+
+
+bowl : List Float -> Float
+bowl xs =
+    case xs of
+        [ x, y ] ->
+            (x - 1) ^ 2 + (y - 2) ^ 2
+
+        _ ->
+            1.0e18
