@@ -48,6 +48,8 @@ module Spreadsheet.Sheet exposing
     , isRowHidden
     , isColHidden
     , subtotalize
+    , evaluateSteps
+    , circularPath
     , nameForRange
     , recalcAll
     , recalcAllWith
@@ -144,6 +146,7 @@ a time for the async, visible-first path — so sync and async always agree.
 import Dict exposing (Dict)
 import Set exposing (Set)
 import Spreadsheet.Ast exposing (Expr)
+import Spreadsheet.Audit as Audit
 import Spreadsheet.Deps as Deps
 import Spreadsheet.Eval as Eval
 import Spreadsheet.Format as Format exposing (Format)
@@ -959,6 +962,81 @@ insertSubtotalRow start end key keyCol valueCol sheet =
         |> insertRows subtotalRow 1
         |> setRaw { col = keyCol, row = subtotalRow } (key ++ " Total")
         |> setRaw { col = valueCol, row = subtotalRow } ("=SUBTOTAL(9," ++ valueRange ++ ")")
+
+
+
+-- FORMULA AUDITING -----------------------------------------------------------
+
+
+{-| The **Evaluate Formula** trace for the cell at `ref`: the formula rendered after each
+single sub-expression reduction, from the original formula down to its value. Empty if the
+cell holds no formula. -}
+evaluateSteps : Ref -> Sheet -> List String
+evaluateSteps ref sheet =
+    case get ref sheet of
+        Just cell ->
+            case cell.parsed of
+                PFormula expr ->
+                    Audit.evaluateSteps (ctxFor noExternal sheet ref) expr
+
+                _ ->
+                    []
+
+        Nothing ->
+            []
+
+
+{-| If the cell at `ref` lies on a circular reference, the cycle of cells leading back to it
+(starting and ending at `ref`); otherwise empty. -}
+circularPath : Ref -> Sheet -> List Ref
+circularPath ref sheet =
+    let
+        start =
+            key ref
+
+        dfs current path =
+            let
+                newPath =
+                    current :: path
+
+                preds =
+                    precedentsOf sheet current
+            in
+            if List.member start preds then
+                Just (List.reverse (start :: newPath))
+
+            else
+                firstJust
+                    (List.map
+                        (\p ->
+                            if List.member p newPath then
+                                Nothing
+
+                            else
+                                dfs p newPath
+                        )
+                        preds
+                    )
+    in
+    case dfs start [] of
+        Just ks ->
+            List.map keyToRef ks
+
+        Nothing ->
+            []
+
+
+firstJust : List (Maybe a) -> Maybe a
+firstJust xs =
+    case xs of
+        [] ->
+            Nothing
+
+        (Just x) :: _ ->
+            Just x
+
+        Nothing :: rest ->
+            firstJust rest
 
 
 

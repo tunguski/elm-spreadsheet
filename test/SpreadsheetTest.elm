@@ -139,6 +139,7 @@ suite =
         , statsToolpakTests
         , forecastTests
         , outlineTests
+        , evalStepTests
         ]
 
 
@@ -3695,6 +3696,59 @@ matAt i j m =
         |> List.head
         |> Maybe.andThen (List.drop j >> List.head)
         |> Maybe.withDefault (0 / 0)
+
+
+evalStepTests : Test
+evalStepTests =
+    describe "formula auditing (Evaluate Formula stepper)"
+        [ test "reduces operator precedence one step at a time" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=1+2*3" ) ]
+                in
+                Expect.equal [ "1+2*3", "1+6", "7" ] (Sheet.evaluateSteps (at "A1") s)
+        , test "resolves cell references left to right" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "10" ), ( "A2", "20" ), ( "A3", "=A1+A2" ) ]
+                in
+                Expect.equal [ "A1+A2", "10+A2", "10+20", "30" ] (Sheet.evaluateSteps (at "A3") s)
+        , test "steps into a function call innermost-first" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "3" ), ( "A2", "4" ), ( "A3", "=SUM(A1,A2)*2" ) ]
+                in
+                Expect.equal
+                    [ "SUM(A1,A2)*2", "SUM(3,A2)*2", "SUM(3,4)*2", "7*2", "14" ]
+                    (Sheet.evaluateSteps (at "A3") s)
+        , test "a non-formula cell has no steps" <|
+            \_ ->
+                Expect.equal [] (Sheet.evaluateSteps (at "A1") (sheetWith [ ( "A1", "42" ) ]))
+        , test "exprToString round-trips parens only where needed" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=(1+2)*3" ) ]
+                in
+                Expect.equal (Just "(1+2)*3") (List.head (Sheet.evaluateSteps (at "A1") s))
+        , test "circularPath reports the cycle through the cell" <|
+            \_ ->
+                let
+                    s =
+                        sheetWith [ ( "A1", "=A2+1" ), ( "A2", "=A1+1" ) ]
+
+                    path =
+                        Sheet.circularPath (at "A1") s
+                in
+                Expect.equal True (List.member (at "A1") path && List.member (at "A2") path)
+        , test "circularPath is empty for an acyclic cell" <|
+            \_ ->
+                Expect.equal []
+                    (Sheet.circularPath (at "A3") (sheetWith [ ( "A1", "5" ), ( "A3", "=A1" ) ]))
+        ]
 
 
 outlineTests : Test
