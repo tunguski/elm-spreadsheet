@@ -1,7 +1,9 @@
 module Workspace.Types exposing
     ( Id, Visibility(..), Principal(..), Access, Meta, Stored, Table, Comment(..)
     , Comments
+    , Selector(..), DocRef
     , defaultAccess, newMeta, emptyTable
+    , selectorKey, selectorLabel, docRefLabel
     , principalKey, principalLabel, principalName, visibilityLabel
     , setName, setKind, setAccess
     , setVisibility, addOwner, removeOwner, addReader, removeReader
@@ -24,7 +26,9 @@ come back `undefined`), so callers reach for these updaters rather than `{ r | �
 site.
 
 @docs Id, Visibility, Principal, Access, Meta, Stored, Table, Comment, Comments
+@docs Selector, DocRef
 @docs defaultAccess, newMeta, emptyTable
+@docs selectorKey, selectorLabel, docRefLabel
 @docs principalKey, principalLabel, principalName, visibilityLabel
 @docs setName, setKind, setAccess
 @docs setVisibility, addOwner, removeOwner, addReader, removeReader
@@ -90,6 +94,32 @@ type alias Table =
     }
 
 
+{-| What part of a referenced document a [`DocRef`](#DocRef) pulls in:
+
+  - `WholeDoc` — the whole document as one table (a SQL query's result, a note's lines).
+  - `Step key` — a named step of a notebook (the `key` is the step's stable id), taking its result.
+  - `RangeSel a1` — a rectangular range of a spreadsheet in `A1:C10` form.
+
+The referenced document decides how to satisfy a selector (a host's `provide`); the workspace only
+routes it. Selectors are deliberately stringly-typed so they cross the document boundary and the
+JSON envelope without the library knowing any host's addressing scheme. -}
+type Selector
+    = WholeDoc
+    | Step String
+    | RangeSel String
+
+
+{-| An outgoing **reference** from one document to another: pull the data named by `selector` out of
+document `docId` and expose it locally under `binding` (a variable name for a notebook, a target
+range for a spreadsheet). The reference graph these form must stay acyclic; see
+[`Workspace.Refs`](Workspace-Refs). -}
+type alias DocRef =
+    { binding : String
+    , docId : Id
+    , selector : Selector
+    }
+
+
 {-| A threaded comment: replies are themselves comments, to any depth. -}
 type Comment
     = Comment
@@ -127,6 +157,44 @@ newMeta id name kind creator =
 emptyTable : Table
 emptyTable =
     { headers = [], rows = [] }
+
+
+
+-- SELECTOR / REFERENCE HELPERS -----------------------------------------------
+
+
+{-| A stable, round-trippable string key for a selector (used by the JSON codec and for de-duping). -}
+selectorKey : Selector -> String
+selectorKey selector =
+    case selector of
+        WholeDoc ->
+            "doc"
+
+        Step key ->
+            "step:" ++ key
+
+        RangeSel a1 ->
+            "range:" ++ a1
+
+
+{-| A short human label for a selector, e.g. "whole document", "step abc", "A1:C10". -}
+selectorLabel : Selector -> String
+selectorLabel selector =
+    case selector of
+        WholeDoc ->
+            "whole document"
+
+        Step key ->
+            "step " ++ key
+
+        RangeSel a1 ->
+            a1
+
+
+{-| A one-line label for a reference, e.g. `orders ← A1:C10`. -}
+docRefLabel : DocRef -> String
+docRefLabel ref =
+    ref.binding ++ " ← " ++ selectorLabel ref.selector
 
 
 

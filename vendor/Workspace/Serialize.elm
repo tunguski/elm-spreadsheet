@@ -3,6 +3,7 @@ module Workspace.Serialize exposing
     , encodeMeta, metaDecoder
     , encodeIndex, indexDecoder
     , encodeComments, commentsDecoder
+    , encodeRefs, refsDecoder, encodeDocRef, docRefDecoder
     )
 
 {-| JSON for everything the workspace persists: a document's [`Meta`](Workspace-Types#Meta) (with
@@ -18,6 +19,7 @@ loading every body.
 @docs encodeMeta, metaDecoder
 @docs encodeIndex, indexDecoder
 @docs encodeComments, commentsDecoder
+@docs encodeRefs, refsDecoder, encodeDocRef, docRefDecoder
 
 -}
 
@@ -29,8 +31,10 @@ import Workspace.Types as Types
         ( Access
         , Comment
         , Comments
+        , DocRef
         , Meta
         , Principal(..)
+        , Selector(..)
         , Stored
         , Visibility(..)
         )
@@ -181,6 +185,71 @@ commentDecoder =
         (D.field "author" D.string)
         (D.field "body" D.string)
         (D.field "replies" (D.list (D.lazy (\_ -> commentDecoder))))
+
+
+
+-- REFERENCES -----------------------------------------------------------------
+
+
+{-| Encode a document's outgoing references (a host stores these inside its own `doc` JSON). -}
+encodeRefs : List DocRef -> E.Value
+encodeRefs refs =
+    E.list encodeDocRef refs
+
+
+{-| Decode a list of outgoing references. -}
+refsDecoder : D.Decoder (List DocRef)
+refsDecoder =
+    D.list docRefDecoder
+
+
+{-| Encode one reference. -}
+encodeDocRef : DocRef -> E.Value
+encodeDocRef ref =
+    E.object
+        [ ( "binding", E.string ref.binding )
+        , ( "docId", E.string ref.docId )
+        , ( "selector", encodeSelector ref.selector )
+        ]
+
+
+{-| Decode one reference. -}
+docRefDecoder : D.Decoder DocRef
+docRefDecoder =
+    D.map3 (\binding docId selector -> { binding = binding, docId = docId, selector = selector })
+        (D.field "binding" D.string)
+        (D.field "docId" D.string)
+        (D.field "selector" selectorDecoder)
+
+
+encodeSelector : Selector -> E.Value
+encodeSelector selector =
+    case selector of
+        WholeDoc ->
+            E.object [ ( "t", E.string "doc" ) ]
+
+        Step key ->
+            E.object [ ( "t", E.string "step" ), ( "key", E.string key ) ]
+
+        RangeSel a1 ->
+            E.object [ ( "t", E.string "range" ), ( "a1", E.string a1 ) ]
+
+
+selectorDecoder : D.Decoder Selector
+selectorDecoder =
+    D.field "t" D.string
+        |> D.andThen
+            (\t ->
+                case t of
+                    "step" ->
+                        D.map Step (D.field "key" D.string)
+
+                    "range" ->
+                        D.map RangeSel (D.field "a1" D.string)
+
+                    _ ->
+                        D.succeed WholeDoc
+            )
 
 
 

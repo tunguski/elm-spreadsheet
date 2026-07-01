@@ -12,15 +12,19 @@ search, copy, share, comment on, import into and export each one — with the en
 
 -}
 
-import Html exposing (Html, div, span, text)
+import Dict exposing (Dict)
+import Html exposing (Html, button, div, h4, input, li, p, section, span, strong, text, ul)
 import Html.Attributes as HA
+import Html.Events as HE
 import Json.Decode as D
 import Json.Encode as E
 import Spreadsheet.Ref as Ref exposing (Ref)
 import Spreadsheet.Sheet as Sheet exposing (Sheet)
 import Spreadsheet.View as View
 import Workspace
-import Workspace.Types exposing (Table)
+import Workspace.I18n as WsI18n
+import Workspace.Serialize as WSerialize
+import Workspace.Types as WTypes exposing (DocRef, Selector(..), Table)
 
 
 
@@ -36,6 +40,8 @@ type alias SheetDoc =
     , cols : Int
     , viewRows : Int
     , totalRows : Int
+    , refs : List DocRef
+    , refDraft : { binding : String, docId : String, source : String }
     }
 
 
@@ -49,6 +55,14 @@ type SheetMsg
     | EditKey View.KeyEvent
     | Scroll Int
     | NoOp
+    | SetRefField String String
+    | AddRef
+    | RemoveRef Int
+
+
+emptyRefDraft : { binding : String, docId : String, source : String }
+emptyRefDraft =
+    { binding = "", docId = "", source = "" }
 
 
 {-| Wrap a recalculated sheet of the given dimensions into a fresh document (A1 selected). -}
@@ -62,6 +76,8 @@ mkDoc rows cols sheet =
     , cols = cols
     , viewRows = Basics.min 16 rows
     , totalRows = rows
+    , refs = []
+    , refDraft = emptyRefDraft
     }
 
 
@@ -123,6 +139,7 @@ encode doc =
         , ( "cells"
           , E.list (encodeCell doc.sheet) (Sheet.occupiedRefs doc.sheet)
           )
+        , ( "refs", WSerialize.encodeRefs doc.refs )
         ]
 
 
@@ -137,10 +154,11 @@ encodeCell sheet ref =
 
 decoder : D.Decoder SheetDoc
 decoder =
-    D.map3 build
+    D.map4 build
         (D.field "rows" D.int)
         (D.field "cols" D.int)
         (D.field "cells" (D.list cellDecoder))
+        (D.oneOf [ D.field "refs" WSerialize.refsDecoder, D.succeed [] ])
 
 
 cellDecoder : D.Decoder ( Ref, String )
@@ -151,12 +169,16 @@ cellDecoder =
         (D.field "v" D.string)
 
 
-build : Int -> Int -> List ( Ref, String ) -> SheetDoc
-build rows cols cells =
-    Sheet.empty rows cols
-        |> Sheet.setRawMany cells
-        |> Sheet.recalcAll
-        |> mkDoc rows cols
+build : Int -> Int -> List ( Ref, String ) -> List DocRef -> SheetDoc
+build rows cols cells refs =
+    let
+        base =
+            Sheet.empty rows cols
+                |> Sheet.setRawMany cells
+                |> Sheet.recalcAll
+                |> mkDoc rows cols
+    in
+    { base | refs = refs }
 
 
 
@@ -192,6 +214,70 @@ updateDoc msg doc =
 
         NoOp ->
             doc
+
+        SetRefField which value ->
+            let
+                d =
+                    doc.refDraft
+
+                d2 =
+                    case which of
+                        "binding" ->
+                            { d | binding = value }
+
+                        "docId" ->
+                            { d | docId = value }
+
+                        _ ->
+                            { d | source = value }
+            in
+            { doc | refDraft = d2 }
+
+        AddRef ->
+            let
+                d =
+                    doc.refDraft
+
+                binding =
+                    String.trim d.binding
+
+                docId =
+                    String.trim d.docId
+
+                source =
+                    String.trim d.source
+            in
+            if binding == "" || docId == "" then
+                doc
+
+            else
+                let
+                    -- A "A1:C10" source is a spreadsheet range; anything else is treated as a
+                    -- notebook step id; blank means the whole document.
+                    selector =
+                        if source == "" then
+                            WholeDoc
+
+                        else if String.contains ":" source then
+                            RangeSel source
+
+                        else
+                            Step source
+                in
+                { doc
+                    | refs = doc.refs ++ [ { binding = binding, docId = docId, selector = selector } ]
+                    , refDraft = emptyRefDraft
+                }
+
+        RemoveRef index ->
+            { doc | refs = dropIndex index doc.refs }
+
+
+dropIndex : Int -> List a -> List a
+dropIndex index xs =
+    List.indexedMap Tuple.pair xs
+        |> List.filter (\( i, _ ) -> i /= index)
+        |> List.map Tuple.second
 
 
 selectCell : Ref -> Bool -> SheetDoc -> SheetDoc
@@ -330,6 +416,43 @@ viewDoc env doc =
           else
             text ""
         , View.view (gridConfig doc) doc.sheet
+        , refsPanel doc
+        ]
+
+
+{-| The document-references panel: pull a range from another spreadsheet (or a step from a notebook)
+into a local top-left cell. Pressing "Reload data" in the workspace toolbar re-fetches them. -}
+refsPanel : SheetDoc -> Html SheetMsg
+refsPanel doc =
+    let
+        d =
+            doc.refDraft
+    in
+    section [ HA.class "sheetdoc-refs" ]
+        [ h4 [ HA.class "sheetdoc-refs-title" ] [ text "External data references" ]
+        , if List.isEmpty doc.refs then
+            p [ HA.class "sheetdoc-refs-empty" ]
+                [ text "Reference a range from another spreadsheet, or a step from a notebook, and drop it into a cell. Use the toolbar's Reload data to refresh." ]
+
+          else
+            ul [ HA.class "sheetdoc-refs-list" ] (List.indexedMap refRow doc.refs)
+        , div [ HA.class "sheetdoc-refs-form" ]
+            [ input [ HA.class "sheetdoc-ref-in", HA.placeholder "into cell (e.g. E1)", HA.value d.binding, HE.onInput (SetRefField "binding") ] []
+            , input [ HA.class "sheetdoc-ref-in", HA.placeholder "document id", HA.value d.docId, HE.onInput (SetRefField "docId") ] []
+            , input [ HA.class "sheetdoc-ref-in", HA.placeholder "range A1:C10 / step id", HA.value d.source, HE.onInput (SetRefField "source") ] []
+            , button [ HA.class "sheetdoc-ref-add", HE.onClick AddRef ] [ text "Add reference" ]
+            ]
+        ]
+
+
+refRow : Int -> DocRef -> Html SheetMsg
+refRow index ref =
+    li [ HA.class "sheetdoc-ref-item" ]
+        [ strong [ HA.class "sheetdoc-ref-binding" ] [ text ref.binding ]
+        , span [ HA.class "sheetdoc-ref-arrow" ] [ text " ← " ]
+        , span [ HA.class "sheetdoc-ref-target" ]
+            [ text (String.left 8 ref.docId ++ " · " ++ WTypes.selectorLabel ref.selector) ]
+        , button [ HA.class "sheetdoc-ref-x", HA.title "Remove", HE.onClick (RemoveRef index) ] [ text "×" ]
         ]
 
 
@@ -418,6 +541,77 @@ fromTable table _ =
 
 
 
+-- CROSS-DOCUMENT REFERENCES --------------------------------------------------
+
+
+{-| Satisfy another document's reference into this spreadsheet: a `RangeSel "A1:C10"` yields that
+block as a table (its first row as headers); `WholeDoc` yields the whole used region. -}
+provide : Selector -> SheetDoc -> Result String Table
+provide selector doc =
+    case selector of
+        RangeSel a1 ->
+            case Ref.rangeFromA1 a1 of
+                Just range ->
+                    Ok (rangeTable range doc.sheet)
+
+                Nothing ->
+                    Err ("not a valid range: " ++ a1)
+
+        WholeDoc ->
+            toTable doc |> Result.fromMaybe "the spreadsheet is empty"
+
+        Step _ ->
+            Err "a spreadsheet is addressed by range, not step"
+
+
+rangeTable : Ref.Range -> Sheet -> Table
+rangeTable range sheet =
+    let
+        grid =
+            Ref.rowsOf range
+                |> List.map (List.map (\ref -> Sheet.displayString ref sheet))
+    in
+    case grid of
+        header :: body ->
+            { headers = header, rows = body }
+
+        [] ->
+            { headers = [], rows = [] }
+
+
+{-| Absorb the resolved reference tables: each reference's `binding` is a local top-left cell (e.g.
+`E1`) where its table is dropped, headers included. Overwriting those cells is exactly the "reload
+data" behaviour — pressing Reload re-fetches and re-drops fresh values. -}
+absorb : Dict String Table -> SheetDoc -> SheetDoc
+absorb tables doc =
+    let
+        edits =
+            Dict.toList tables |> List.concatMap tableEdits
+
+        tableEdits ( binding, table ) =
+            case Ref.fromA1 binding of
+                Just topLeft ->
+                    placeTable topLeft table
+
+                Nothing ->
+                    []
+    in
+    { doc | sheet = Sheet.setRawMany edits doc.sheet }
+
+
+placeTable : Ref -> Table -> List ( Ref, String )
+placeTable topLeft table =
+    (table.headers :: table.rows)
+        |> List.indexedMap
+            (\dr row ->
+                List.indexedMap
+                    (\dc v -> ( { col = topLeft.col + dc, row = topLeft.row + dr }, v ))
+                    row
+            )
+        |> List.concat
+
+
+
 -- CONFIG ---------------------------------------------------------------------
 
 
@@ -426,10 +620,16 @@ config =
     { codec = { encode = encode, decoder = decoder }
     , empty = empty
     , kind = "spreadsheet"
-    , activate = identity
+    , activate = \doc -> { doc | sheet = Sheet.recalcAll doc.sheet }
     , viewDoc = viewDoc
     , updateDoc = updateDoc
     , elementsOf = elementsOf
     , toTable = toTable
     , onImport = Just fromTable
+    , t = WsI18n.en
+    , templates = []
+    , references = .refs
+    , provide = provide
+    , absorb = absorb
+    , docSql = \_ -> Nothing
     }
